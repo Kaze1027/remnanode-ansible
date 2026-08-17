@@ -1,0 +1,32 @@
+services:
+  remnanode:
+    image: ghcr.io/<你的GitHub用户名>/<仓库名>/node:latest
+    container_name: remnanode
+    restart: unless-stopped
+    environment:
+      - API=你的面板API地址
+      - SUB=你的订阅地址
+    ports:
+      - "443:443/tcp"
+      - "443:443/udp"
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+    networks:
+      - node-net
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+    networks:
+      - node-net
+
+networks:
+  node-net:
+    driver: bridge

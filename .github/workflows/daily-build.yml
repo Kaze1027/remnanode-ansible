@@ -1,0 +1,77 @@
+name: daily-build
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and verify geoip.dat
+        run: |
+          curl -fL -o geoip.dat \
+            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+          curl -fL -o geoip.dat.sha256sum \
+            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat.sha256sum"
+          EXPECTED=$(awk '{print $1}' geoip.dat.sha256sum)
+          ACTUAL=$(sha256sum geoip.dat | awk '{print $1}')
+          if [ "$EXPECTED" = "$ACTUAL" ]; then
+            echo "geoip.dat checksum OK"
+          else
+            echo "geoip.dat CHECKSUM MISMATCH (expected $EXPECTED, got $ACTUAL)" >&2
+            exit 1
+          fi
+
+      - name: Download and verify geosite.dat
+        run: |
+          curl -fL -o geosite.dat \
+            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+          curl -fL -o geosite.dat.sha256sum \
+            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat.sha256sum"
+          EXPECTED=$(awk '{print $1}' geosite.dat.sha256sum)
+          ACTUAL=$(sha256sum geosite.dat | awk '{print $1}')
+          if [ "$EXPECTED" = "$ACTUAL" ]; then
+            echo "geosite.dat checksum OK"
+          else
+            echo "geosite.dat CHECKSUM MISMATCH (expected $EXPECTED, got $ACTUAL)" >&2
+            exit 1
+          fi
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push image
+        run: |
+          IMAGE="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')/node:latest"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Verify dat files inside built image
+        run: |
+          CID=$(docker run -d --entrypoint sh "$IMAGE" -c 'sleep 600')
+          for f in geoip.dat geosite.dat; do
+            P=$(docker exec "$CID" sh -c 'find / -type f -name "$1" 2>/dev/null | head -n 1' sh "$f")
+            if [ -z "$P" ]; then
+              echo "ERROR: $f not found inside image" >&2
+              docker rm -f "$CID" >/dev/null
+              exit 1
+            fi
+            docker cp "$CID:$P" "/tmp/$f.image"
+            if cmp -s "$f" "/tmp/$f.image"; then
+              echo "$f verified inside image at $P"
+            else
+              echo "ERROR: $f inside image differs from downloaded file" >&2
+              docker rm -f "$CID" >/dev/null
+              exit 1
+            fi
+          done
+          docker rm -f "$CID" >/dev/null
