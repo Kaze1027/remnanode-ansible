@@ -1,6 +1,3 @@
 /.local/
-<<<<<<< HEAD
-=======
 README.md
->>>>>>> eb072f5 (修复playbooks路径缺失templates)
 /ansible/inventory/production.yml
