@@ -3,6 +3,23 @@
   hosts: nodes
   become: true
   tasks:
+    - name: Ensure curl is installed
+      ansible.builtin.apt:
+        name: curl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Check if docker is installed
+      ansible.builtin.command: command -v docker
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install docker via get.docker.com
+      when: docker_check.rc != 0
+      ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+
     - name: Ensure compose directory exists
       ansible.builtin.file:
         path: "{{ compose_dir }}"
