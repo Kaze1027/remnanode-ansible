@@ -1,4 +1,0 @@
-node_image: ghcr.io/kaze1027/remnanode-ansible/remnanode:latest
-node_port_default: 22222
-compose_dir: /opt/remnanode
-watchtower_schedule: "0 0 4 * * *"
