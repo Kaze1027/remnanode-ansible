@@ -1,0 +1,12 @@
+---
+- name: Update remnanode images
+  hosts: nodes
+  become: true
+  tasks:
+    - name: Pull and recreate containers
+      ansible.builtin.shell:
+        cmd: docker compose pull && docker compose up -d
+        chdir: "{{ compose_dir }}"
+
+    - name: Prune dangling images
+      ansible.builtin.command: docker image prune -f

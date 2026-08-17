@@ -1,0 +1,19 @@
+---
+- name: Deploy remnanode nodes
+  hosts: nodes
+  become: true
+  tasks:
+    - name: Ensure compose directory exists
+      ansible.builtin.file:
+        path: "{{ compose_dir }}"
+        state: directory
+
+    - name: Render docker-compose.yml from template
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ compose_dir }}/docker-compose.yml"
+
+    - name: Pull images and start containers
+      ansible.builtin.shell:
+        cmd: docker compose pull && docker compose up -d
+        chdir: "{{ compose_dir }}"

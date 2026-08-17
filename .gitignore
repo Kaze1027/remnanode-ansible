@@ -1,2 +1,3 @@
 /.local/
 README.md
+/ansible/inventory/production.yml
