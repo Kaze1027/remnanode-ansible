@@ -20,6 +20,27 @@
       when: docker_check.rc != 0
       ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
 
+    - name: Ensure chrony is installed
+      ansible.builtin.apt:
+        name: chrony
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Enable and start chrony
+      ansible.builtin.systemd:
+        name: chrony
+        enabled: true
+        state: started
+
+    - name: Step system clock immediately
+      ansible.builtin.command: chronyc makestep
+      changed_when: false
+
+    - name: Set timezone to Asia/Shanghai
+      ansible.builtin.timezone:
+        name: Asia/Shanghai
+
     - name: Ensure compose directory exists
       ansible.builtin.file:
         path: "{{ compose_dir }}"
