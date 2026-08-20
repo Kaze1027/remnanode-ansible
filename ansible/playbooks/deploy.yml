@@ -41,6 +41,14 @@
       ansible.builtin.timezone:
         name: Asia/Shanghai
 
+    # 部分 Debian 云主机创建后未把本地主机名写入 /etc/hosts，
+    # 等价于: sudo sh -c 'grep -q "127.0.0.1 $(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> /etc/hosts'
+    - name: Ensure local hostname is present in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "127.0.0.1 {{ ansible_hostname }}"
+        create: true
+
     - name: Ensure compose directory exists
       ansible.builtin.file:
         path: "{{ compose_dir }}"
