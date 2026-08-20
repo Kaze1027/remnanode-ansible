@@ -1,4 +1,4 @@
-FROM remnawave/node:latest
+FROM remnawave/node:3.2.2
 
 COPY geoip.dat /tmp/geoip.dat
 COPY geosite.dat /tmp/geosite.dat

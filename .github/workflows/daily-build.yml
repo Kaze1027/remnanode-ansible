@@ -50,10 +50,11 @@ jobs:
 
       - name: Build and push image
         run: |
-          IMAGE="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')/remnanode:latest"
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
+          REPO="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          docker build -t "$REPO/remnanode:latest" -t "$REPO/remnanode:3.2.2" .
+          docker push "$REPO/remnanode:latest"
+          docker push "$REPO/remnanode:3.2.2"
+          echo "IMAGE=$REPO/remnanode:latest" >> "$GITHUB_ENV"
 
       - name: Verify dat files inside built image
         run: |
