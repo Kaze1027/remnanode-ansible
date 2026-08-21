@@ -9,12 +9,12 @@
   become: true
   gather_facts: true
   vars:
-    dynamicv6_bin_dir: "{{ dynamicv6_bin_dir | default('/usr/local/bin') }}"
-    dynamicv6_state_file: "{{ dynamicv6_state_file | default('/var/lib/dynamicv6/client-eth0.state') }}"
-    dynamicv6_iface: "{{ dynamicv6_iface | default('eth0') }}"
-    dynamicv6_llgw: "{{ dynamicv6_llgw | default('') }}"
-    dynamicv6_client_service: "dynamicv6-client.service"
-    dynamicv6_client_timer: "dynamicv6-client.timer"
+    dynamicv6_bin_dir: /usr/local/bin
+    dynamicv6_state_file: /var/lib/dynamicv6/client-eth0.state
+    dynamicv6_iface: eth0
+    dynamicv6_llgw: ""
+    dynamicv6_client_service: dynamicv6-client.service
+    dynamicv6_client_timer: dynamicv6-client.timer
     dynamicv6_script_url: "https://billing.aethercloud.io/dynamicv6/client.sh"
   tasks:
 
@@ -25,7 +25,7 @@
       loop:
         - curl
         - jq
-      when: ansible_os_family is defined
+      when: ansible_facts['os_family'] is defined
 
     - name: Install/refresh Aether dynamicv6 client (idempotent)
       ansible.builtin.shell:
@@ -37,10 +37,9 @@
           fi
           # 用 SELECT_MODE=all 全选, 非交互式安装 systemd timer
           DYNAMICV6_SELECT_MODE=all DYNAMICV6_AUTO_TIMER=1 /usr/local/bin/dynamicv6-client.sh {{ dynamicv6_iface }}
-        args:
-          executable: /bin/bash
+        executable: /bin/bash
       register: client_install
-      changed_when: client_install.stdout | length > 0
+      changed_when: (client_install.stdout | default('')) | length > 0
 
     - name: Ensure postprocess directory exists
       ansible.builtin.file:

@@ -8,8 +8,8 @@
   become: true
   gather_facts: true
   vars:
-    dynamicv6_iface: "{{ dynamicv6_iface | default('eth0') }}"
-    dynamicv6_client_timer: "{{ dynamicv6_client_timer | default('dynamicv6-client.timer') }}"
+    dynamicv6_iface: eth0
+    dynamicv6_client_timer: dynamicv6-client.timer
   tasks:
 
     - name: Check DynamicV6 timer state
