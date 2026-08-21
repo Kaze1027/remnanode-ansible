@@ -1,0 +1,55 @@
+---
+# 验证各节点 Aether 动态IPv6 容错方案是否生效
+# 检查: timer 状态、默认 IPv6 路由、IPv6 出口与原生地址是否一致
+# 用法（使用用户自己的 production.yml 清单，其 ansible_host 为域名如 us15.awso.cloud）:
+#   ansible-playbook -i inventory/production.yml playbooks/dynamicv6-verify.yml
+- name: Verify DynamicV6 fallback scheme on Aether nodes
+  hosts: nodes
+  become: true
+  gather_facts: true
+  vars:
+    dynamicv6_iface: "{{ dynamicv6_iface | default('eth0') }}"
+    dynamicv6_client_timer: "{{ dynamicv6_client_timer | default('dynamicv6-client.timer') }}"
+  tasks:
+
+    - name: Check DynamicV6 timer state
+      ansible.builtin.shell:
+        cmd: "systemctl is-active {{ dynamicv6_client_timer }}; systemctl is-enabled {{ dynamicv6_client_timer }}"
+      register: timer
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show timer state
+      ansible.builtin.debug:
+        var: timer.stdout_lines
+
+    - name: Show current default IPv6 route
+      ansible.builtin.shell:
+        cmd: "ip -6 route show default metric 1024"
+      register: route
+      changed_when: false
+
+    - name: Show default IPv6 route
+      ansible.builtin.debug:
+        var: route.stdout_lines
+
+    - name: Show native IPv6 source candidates (2602:)
+      ansible.builtin.shell:
+        cmd: "ip -6 addr show {{ dynamicv6_iface }} | grep -oP '2602:[0-9a-f:]+(?=/)' | sort -u"
+      register: native_src
+      changed_when: false
+
+    - name: Show native IPv6
+      ansible.builtin.debug:
+        var: native_src.stdout_lines
+
+    - name: Test IPv6 egress (HTTPS httpbin)
+      ansible.builtin.shell:
+        cmd: "curl -6 -sS --max-time 10 https://api64.ipify.org 2>&1 || echo 'IPv6_EGRESS_FAIL'"
+      register: egress
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show IPv6 egress result
+      ansible.builtin.debug:
+        var: egress.stdout

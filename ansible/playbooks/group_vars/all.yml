@@ -1,4 +1,14 @@
-node_image: ghcr.io/kaze1027/remnanode-ansible/remnanode:3.2.2
-node_port_default: 22222
-compose_dir: /opt/remnanode
-watchtower_schedule: "0 0 4 * * *"
+# 公共变量：所有节点共享，可在 inventory 主机条目中覆盖
+node_image: ghcr.io/kaze1027/remnanode-ansible/remnanode:3.2.2   # 固定 3.2.2 版本镜像
+node_port_default: 22222                                          # 默认节点端口，每台可用 node_port 覆盖
+compose_dir: /opt/remnanode                                       # 节点上 compose 文件目录
+watchtower_schedule: "0 0 4 * * *"                                # 每天 UTC 04:00（北京 12:00）检查更新
+
+# ---- DynamicV6 容错方案（动态IPv6优先, 原生IPv6兜底）----
+dynamicv6_bin_dir: /usr/local/bin                               # 后处理脚本目录
+dynamicv6_iface: eth0                                            # 主网卡（个别机器可能不同，可在 inventory 覆盖）
+dynamicv6_state_file: /var/lib/dynamicv6/client-eth0.state       # 服务商 state 文件路径
+dynamicv6_llgw: ""                                               # 兜底链路本地网关（默认留空，脚本自动探测 fe80: router）
+dynamicv6_client_service: dynamicv6-client.service
+dynamicv6_client_timer: dynamicv6-client.timer
+dynamicv6_script_url: "https://billing.aethercloud.io/dynamicv6/client.sh"
