@@ -37,14 +37,23 @@
       changed_when: false
       ignore_errors: true
 
-    # --- 多端点 TCP 探测实际出口; 再取一次出口 IP 便于人工核对 ---
-    - name: Probe IPv6 egress (multi-endpoint) and read egress IP
+    # --- 多端点 TCP 探测实际出口; 第一轮失败则等 5s 复测(防抖动线路误报) ---
+    - name: Probe IPv6 egress (multi-endpoint, 2-round) and read egress IP
       ansible.builtin.shell: |
-        ok=0
-        for u in {{ probe_urls }}; do
-          if curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 "$u" >/dev/null 2>&1; then ok=1; break; fi
-        done
-        if [ "$ok" -eq 1 ]; then echo "verdict=PASS"; else echo "verdict=FAIL"; fi
+        probe_once() {
+          local u
+          for u in {{ probe_urls }}; do
+            curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 "$u" >/dev/null 2>&1 && return 0
+          done
+          return 1
+        }
+        if probe_once; then
+          echo "verdict=PASS"
+        elif sleep 5 && probe_once; then
+          echo "verdict=UNSTABLE"
+        else
+          echo "verdict=FAIL"
+        fi
         ip=""
         for u in https://api6.ipify.org https://v6.ipinfo.io/ip; do
           ip=$(curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 "$u" 2>/dev/null) && [ -n "$ip" ] && break
