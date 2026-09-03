@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# ============================================================================
+# dynamicv6-manager.sh —— 服务商 client.sh 的路由管理接管器
+# 只让 client.sh 负责"获取并下发 IPv6 地址 + 写 state + DNS"，彻底禁用其对
+# 【默认路由 / source-policy 路由】的管理，默认路由唯一管理者是 egress-picker。
+#
+# 关键实现：用 sed 把 client.sh 中所有会动路由的【调用点】删除/禁用，
+#          而不是追加函数覆盖（追加在脚本末尾、晚于调用点，时机无效）。
+# 被禁用的函数调用：
+#   pin_main_default_route_source       (改默认路由 src)
+#   apply_source_policy_routes          (建 source-policy rules/tables)
+#   verify_and_repair_dynamicv6_routes  (repaired 动默认/策略路由)
+# ============================================================================
+set -uo pipefail
+
+IFACE="${DYNAMICV6_IFACE:-eth0}"
+TMP="/tmp/dynamicv6-manager"
+CLIENT_URL="${DYNAMICV6_CLIENT_URL:-https://aethercloud.io/dynamicv6/client.sh}"
+
+log() { echo "[dynamicv6-manager] $*"; }
+
+mkdir -p "$TMP"
+LATEST="$TMP/client-latest.sh"
+if curl -4 -fsSL --max-time 30 "$CLIENT_URL" -o "$LATEST"; then
+  chmod +x "$LATEST"
+  log "downloaded latest client.sh"
+else
+  log "WARN: download failed, using local fallback"
+  LATEST="/usr/local/bin/dynamicv6-client.sh"
+fi
+
+STRIPPED="$TMP/client-stripped.sh"
+cp -f "$LATEST" "$STRIPPED"
+chmod +x "$STRIPPED"
+
+# ---- 用 sed 禁用路由管理调用点（行首保留，改为空操作）----
+# 1) 禁用改默认路由 src 的函数调用
+sed -i \
+  -e 's/^[[:space:]]*pin_main_default_route_source .*$/      : # route-mgmt disabled/' \
+  -e 's/^[[:space:]]*apply_source_policy_routes .*$/      : # route-mgmt disabled/' \
+  -e 's/^[[:space:]]*verify_and_repair_dynamicv6_routes .*$/      : # route-mgmt disabled/' \
+  "$STRIPPED"
+
+# 保险：若调用被多行或别名包裹，也把函数体整体置空（用 awk 删除函数体）
+awk '
+  /^(pin_main_default_route_source|apply_source_policy_routes|verify_and_repair_dynamicv6_routes)\(\)[[:space:]]*\{?$/ {
+    skip = 1; print $0" # disabled-body"; next
+  }
+  skip && /^[[:space:]]*}/ { skip = 0; print "    return 0"; print $0; next }
+  skip { next }
+  { print }
+' "$STRIPPED" > "$TMP/client-stripped.tmp" && mv -f "$TMP/client-stripped.tmp" "$STRIPPED"
+chmod +x "$STRIPPED"
+
+# ---- 清理历史可能残留的 source-policy rules/tables ----
+for i in $(seq 0 31); do
+  ip -6 rule del pref $((16000 + i)) >/dev/null 2>&1 || true
+  ip -6 route flush table $((16000 + i)) >/dev/null 2>&1 || true
+done
+
+# ---- 用 preserve 策略运行（不 add 备份路由），仅下发地址/state/DNS ----
+export DYNAMICV6_ROUTE_POLICY=preserve
+export DYNAMICV6_AUTO_TIMER="${DYNAMICV6_AUTO_TIMER:-1}"
+export DYNAMICV6_IFACE="$IFACE"
+
+log "running stripped client.sh (route-mgmt fully disabled) iface=$IFACE"
+exec bash "$STRIPPED" --run "$IFACE"

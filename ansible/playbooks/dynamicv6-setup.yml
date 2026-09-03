@@ -1,90 +1,176 @@
 ---
-# 部署 Aether 动态IPv6 容错方案到 nodes 组的所有节点
-# 逻辑: 方案客户端脚本 + systemd override，用回退脚本保证"动态v6优先, 原生v6兜底"
-# 用法（使用用户自己的 production.yml 清单，其 ansible_host 为域名如 us15.awso.cloud）:
+# 部署 Aether DynamicV6 零抖动方案（manager + egress-picker）到 nodes 组所有节点
+#
+# 架构：
+#   [dynamicv6-manager.sh]  (systemd ExecStart)
+#       - 每次动态下载最新 client.sh（跟随服务商更新）
+#       - sed 剥离其全部路由管理（pin src / source-policy / verify-repair）
+#       - 只负责下发所有 IPv6 地址 + 写 state + DNS
+#   [egress-picker.sh v3.2] (systemd ExecStartPost)
+#       - 独占默认路由：按持久化状态 HOLD 钉死出口，零抖动
+#
+# 部署后 systemd 结构（完全由本 playbook 掌管，避免服务商 client.sh 干扰）：
+#   /etc/systemd/system/dynamicv6-client.service
+#       ExecStart=/usr/local/bin/dynamicv6-manager.sh eth0
+#       ExecStartPost(POST only)=/usr/local/bin/egress-picker.sh
+#   /etc/systemd/system/dynamicv6-client.service.d/override.conf
+#       Environment=DYNAMICV6_ROUTE_POLICY=preserve
+#       Environment=DYNAMICV6_AUTO_TIMER=0   (阻止 client.sh 自己装 timer/service，避免覆盖本结构)
+#   /etc/systemd/system/dynamicv6-client.timer
+#       由本 playbook 写入并 enable（2 分钟，弹性可调）
+#
+# 同时清理旧脚本遗留：
+#   - 删除旧的 dynamicv6-postprocess.sh / 旧版脚本备份
+#   - 清理 client.sh 可能残留的 source-policy rules/tables
+#
+# 用法：
 #   ansible-playbook -i inventory/production.yml playbooks/dynamicv6-setup.yml            # 全量
-#   ansible-playbook -i inventory/production.yml playbooks/dynamicv6-setup.yml --limit node-15  # 单台
-- name: Deploy DynamicV6 fallback scheme to Aether nodes
+#   ansible-playbook -i inventory/production.yml playbooks/dynamicv6-setup.yml --limit node-32  # 单台
+- name: Deploy DynamicV6 零抖动方案 (manager + egress-picker)
   hosts: nodes
   become: true
   gather_facts: true
   vars:
     dynamicv6_bin_dir: /usr/local/bin
-    dynamicv6_state_file: /var/lib/dynamicv6/client-eth0.state
     dynamicv6_iface: eth0
-    dynamicv6_llgw: ""
     dynamicv6_client_service: dynamicv6-client.service
     dynamicv6_client_timer: dynamicv6-client.timer
-    dynamicv6_script_url: "https://billing.aethercloud.io/dynamicv6/client.sh"
+    dynamicv6_client_url: "https://aethercloud.io/dynamicv6/client.sh"
   tasks:
 
-    - name: Ensure curl and jq are installed
+    # ---------- 0. 依赖 ----------
+    - name: 确保 curl/jq/ping 已安装
       ansible.builtin.package:
         name: "{{ item }}"
         state: present
       loop:
         - curl
         - jq
-      when: ansible_facts['os_family'] is defined
+        - iputils-ping
+      when: ansible_facts.get('os_family', '') is defined
+      ignore_errors: true
+      tags: deps
 
-    - name: Install/refresh Aether dynamicv6 client (idempotent)
-      ansible.builtin.shell:
-        cmd: |
-          set -e
-          if [ ! -x /usr/local/bin/dynamicv6-client.sh ]; then
-            curl -fsSL {{ dynamicv6_script_url }} -o /usr/local/bin/dynamicv6-client.sh
-            chmod +x /usr/local/bin/dynamicv6-client.sh
-          fi
-          # 用 SELECT_MODE=all 全选, 非交互式安装 systemd timer
-          DYNAMICV6_SELECT_MODE=all DYNAMICV6_AUTO_TIMER=1 /usr/local/bin/dynamicv6-client.sh {{ dynamicv6_iface }}
-        executable: /bin/bash
-      register: client_install
-      changed_when: (client_install.stdout | default('')) | length > 0
-
-    - name: Ensure postprocess directory exists
+    # ---------- 1. 部署本方案脚本 ----------
+    - name: 确保 bin 目录存在
       ansible.builtin.file:
         path: "{{ dynamicv6_bin_dir }}"
         state: directory
         mode: "0755"
 
-    - name: Deploy dynamicv6-postprocess.sh fallback script
+    - name: 部署 dynamicv6-manager.sh
       ansible.builtin.template:
-        src: dynamicv6-postprocess.sh.j2
-        dest: "{{ dynamicv6_bin_dir }}/dynamicv6-postprocess.sh"
+        src: dynamicv6-manager.sh.j2
+        dest: "{{ dynamicv6_bin_dir }}/dynamicv6-manager.sh"
         mode: "0755"
         owner: root
         group: root
 
-    - name: Ensure service drop-in directory exists
+    - name: 部署 egress-picker.sh (v3.2 零抖动)
+      ansible.builtin.template:
+        src: egress-picker.sh.j2
+        dest: "{{ dynamicv6_bin_dir }}/egress-picker.sh"
+        mode: "0755"
+        owner: root
+        group: root
+
+    # ---------- 2. 清理旧脚本遗留 ----------
+    - name: 删除旧版脚本（避免干扰）
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ dynamicv6_bin_dir }}/dynamicv6-postprocess.sh"
+        - "{{ dynamicv6_bin_dir }}/egress-picker.sh.v2.orig"
+        - "{{ dynamicv6_bin_dir }}/egress-picker-v3.sh"
+        - "{{ dynamicv6_bin_dir }}/egress-picker-v3.2.sh"
+      tags: cleanup
+
+    # ---------- 3. 写 systemd service（唯一管理者）----------
+    - name: 写 dynamicv6-client.service 主文件
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ dynamicv6_client_service }}"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=DynamicV6 VM Reconcile (manager + egress-picker)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ dynamicv6_bin_dir }}/dynamicv6-manager.sh {{ dynamicv6_iface }}
+
+    - name: 确保 service drop-in 目录存在
       ansible.builtin.file:
         path: "/etc/systemd/system/{{ dynamicv6_client_service }}.d"
         state: directory
         mode: "0755"
 
-    - name: Deploy systemd override.conf
-      ansible.builtin.template:
-        src: dynamicv6-override.conf.j2
+    - name: 写 override.conf（preserve + 禁 client 自管 + ExecStartPost=egress-picker）
+      ansible.builtin.copy:
         dest: "/etc/systemd/system/{{ dynamicv6_client_service }}.d/override.conf"
         mode: "0644"
-        owner: root
-        group: root
+        content: |
+          [Service]
+          Environment=DYNAMICV6_ROUTE_POLICY=preserve
+          Environment=DYNAMICV6_AUTO_TIMER=0
+          ExecStartPost={{ dynamicv6_bin_dir }}/egress-picker.sh
 
-    - name: Reload systemd daemon
+    # ---------- 4. 写 timer（本 playbook 掌管）----------
+    - name: 写 dynamicv6-client.timer
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ dynamicv6_client_timer }}"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Run DynamicV6 VM Reconcile
+
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=2min
+          AccuracySec=5s
+          Unit={{ dynamicv6_client_service }}
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    # ---------- 5. reload / 清理 policy rules ----------
+    - name: 清理服务商可能残留的 source-policy rules/tables
+      ansible.builtin.shell:
+        cmd: |
+          for i in $(seq 0 127); do ip -6 rule del pref $((16000 + i)) >/dev/null 2>&1 || true; done
+          for i in $(seq 0 127); do ip -6 route flush table $((16000 + i)) >/dev/null 2>&1 || true; done
+      changed_when: false
+      tags: cleanup
+
+    - name: systemd daemon-reload
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: Enable and start DynamicV6 timer
+    # ---------- 6. 启动 timer + 首次执行 ----------
+    - name: 启用并启动 timer
       ansible.builtin.systemd:
         name: "{{ dynamicv6_client_timer }}"
         enabled: true
         state: started
 
-    - name: Run postprocess manually now to apply fallback route immediately
+    - name: 首次跑 manager（下发全部地址）+ egress-picker（定出口）
       ansible.builtin.shell:
-        cmd: "{{ dynamicv6_bin_dir }}/dynamicv6-postprocess.sh"
-      register: post
+        cmd: |
+          set -e
+          systemctl start {{ dynamicv6_client_service }}
+        executable: /bin/bash
+      register: firstrun
       changed_when: true
 
-    - name: Show applied default route
+    - name: 显示当前默认路由
+      ansible.builtin.shell:
+        cmd: "ip -6 route show default"
+      register: dfl
+      changed_when: false
+
+    - name: 输出默认路由
       ansible.builtin.debug:
-        msg: "{{ post.stdout_lines | default([]) }}"
+        var: dfl.stdout_lines

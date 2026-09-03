@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# ============================================================================
+# egress-picker.sh  v3.3  ——  Aether DynamicV6 出口选择器（零抖动 / 健康钉死）
+#
+# 职责：只负责"测试哪个 IPv6 可用，把可用的设为出口"，并保证【无抖动】。
+#
+# v3.3 相对 v3.2 的修复（2026-09-03，实测依据）：
+#   1. 健康闸门（核心修复）：
+#      v3.2 的 HOLD 只要"地址还在接口上"就无条件钉死、从不探测，
+#      导致上游池/线路死亡（如 409d:8、409d:bee 动态池 TCP 全挂）时
+#      节点永久钉死在死出口上。
+#      v3.3：HOLD 每轮做一次健康探测：
+#        - 健康 -> 继续钉死（零抖动，行为不变）
+#        - 连续 EGRESS_FAIL_LIMIT(默认2) 轮探测失败 -> 才触发重选（防瞬断抖动）
+#   2. 探测方式改为【多端点 TCP】（--interface 绑定源地址）：
+#      v3.2 用 ping（被 ATT/部分上游禁 ping 误判）+ 单端点 curl v6.ipinfo.io
+#      （ipinfo 在部分上游(ATT 2602)根本不可达，误判健康源为死）。
+#      v3.3：源地址对任一探测端点返回 HTTP 2xx 即视为可用；
+#      对 4 个公共端点探测，规避单端点误判。
+#
+# 选择策略（不变）：动态优先，原生兜底；重选成功后持久化到 egress-picker.state。
+# ============================================================================
+set -uo pipefail
+
+IFACE="${DYNAMICV6_IFACE:-eth0}"
+STATE_FILE="${DYNAMICV6_STATE_FILE:-/var/lib/dynamicv6/client-eth0.state}"
+EGRESS_STATE="/var/lib/dynamicv6/egress-picker.state"          # 持久化当前出口
+EGRESS_FAIL_STATE="/var/lib/dynamicv6/egress-picker.failcount" # 连续探测失败计数
+EGRESS_FAIL_LIMIT="${EGRESS_FAIL_LIMIT:-2}"                    # 连续失败 N 轮后重选
+# 多端点 TCP 探测（按序尝试；任一成功即健康）。可用 V6_TEST_URLS / V6_TEST_URL 覆盖。
+CURL_URLS=( "https://one.one.one.one/cdn-cgi/trace" "https://api6.ipify.org" "https://v6.ipinfo.io/ip" "https://www.google.com/generate_204" )
+if [[ -n "${V6_TEST_URLS:-}" ]]; then
+  CURL_URLS=( ${V6_TEST_URLS} )
+elif [[ -n "${V6_TEST_URL:-}" ]]; then
+  CURL_URLS=( "${V6_TEST_URL}" )
+fi
+METRIC=1024
+TAG="[egress-picker]"
+
+say()  { echo "${TAG} $*"; }
+die()  { say "ERROR: $*"; exit 1; }
+
+route_field()   { awk -v k="$2" '{for(i=1;i<=NF;i++) if($i==k){print $(i+1); exit}}' <<<"$1"; }
+route_metric()  { sed -n 's/.* metric \([0-9][0-9]*\).*/\1/p' <<<"$1"; }
+route_onlink()  { grep -qw onlink <<<"$1" && echo 1 || echo 0; }
+strip_cidr()    { echo "${1%/*}"; }
+
+current_default() {
+  ip -6 route show default dev "$IFACE" | awk '
+    { m = 999999; for (i = 1; i <= NF; i++) if ($i == "metric") m = $(i + 1);
+      if (best == "" || m < bm) { best = $0; bm = m } }
+    END { print best }'
+}
+
+addr_on_iface() { ip -6 -o addr show dev "$IFACE" scope global | awk '{print $4}' | grep -qF "$1/"; }
+addr_is_dynamic() {
+  local want="$1" c
+  while read -r c; do [[ -n "$c" ]] && [[ "$(strip_cidr "$c")" == "$want" ]] && return 0; done \
+    < <(jq -r '.ipv6_cidrs[]?' "$STATE_FILE" 2>/dev/null)
+  return 1
+}
+
+ensure_gw_route() {
+  local gw="$1"; [[ "${gw,,}" == fe80:* ]] && return 0
+  ip -6 route replace "${gw}/128" dev "$IFACE" metric 1023 onlink 2>/dev/null
+}
+replace_default() {
+  local via="$1" src="$2" onlink="$3"
+  local -a args=(ip -6 route replace default via "$via" dev "$IFACE")
+  [[ -n "$src" ]] && args+=(src "$src")
+  args+=(metric "$METRIC")
+  [[ "$onlink" == "1" ]] && args+=(onlink)
+  "${args[@]}"
+}
+
+# ---- 多端点 TCP 健康探测：源地址 $1 对任一端点 HTTP 2xx 即健康 ----
+tcp_ok() {
+  local u
+  for u in "${CURL_URLS[@]}"; do
+    timeout 7 curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 4 \
+      --interface "$1" "$u" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+probe_ok()   { tcp_ok "$1"; }
+probe_fast() { tcp_ok "$1"; }
+
+fail_reset() { rm -f "$EGRESS_FAIL_STATE"; }
+fail_get()   { cat "$EGRESS_FAIL_STATE" 2>/dev/null || echo 0; }
+fail_inc()   { local n=$(( $(fail_get) + 1 )); echo "$n" > "$EGRESS_FAIL_STATE"; echo "$n"; }
+
+cleanup_backup_defaults() {
+  local line m
+  while read -r line; do m="$(route_metric "$line")"; [[ -n "$m" && "$m" -ge 2048 ]] && ip -6 route del $line 2>/dev/null; done \
+    < <(ip -6 route show default dev "$IFACE")
+}
+
+# 给定地址，找出对应网关（动态按 index 匹配 gateways；原生用 native_default.gateway）
+gw_for_addr() {
+  local addr="$1" i c
+  local -a CIDRS GWS
+  mapfile -t CIDRS < <(jq -r '.ipv6_cidrs[]?' "$STATE_FILE" 2>/dev/null)
+  mapfile -t GWS   < <(jq -r '.gateways[]?'   "$STATE_FILE" 2>/dev/null)
+  for i in "${!CIDRS[@]}"; do
+    c="$(strip_cidr "${CIDRS[$i]}")"
+    if [[ "$c" == "$addr" && -n "${GWS[$i]:-}" ]]; then echo "${GWS[$i]}"; return 0; fi
+  done
+  # 原生
+  local ng
+  ng="$(jq -r '.native_default.gateway // empty' "$STATE_FILE" 2>/dev/null)"
+  [[ -n "$ng" ]] && [[ "$addr" == "$(jq -r '.native_default.src // empty' "$STATE_FILE" 2>/dev/null)" ]] && echo "$ng"
+}
+
+main() {
+  [[ -f "$STATE_FILE" ]] || die "client state missing: $STATE_FILE"
+  command -v jq   >/dev/null 2>&1 || die "jq not available"
+  command -v curl >/dev/null 2>&1 || die "curl not available"
+
+  local nat_src nat_gw nat_on
+  nat_src="$(jq -r '.native_default.src // empty'   "$STATE_FILE" 2>/dev/null)"
+  nat_gw="$(jq -r '.native_default.gateway // empty' "$STATE_FILE" 2>/dev/null)"
+  nat_on="$(jq -r '.native_default.onlink // 0'     "$STATE_FILE" 2>/dev/null)"; [[ "$nat_on" == "1" ]] || nat_on=0
+
+  local last_addr=""
+  if [[ -e "$EGRESS_STATE" ]]; then last_addr="$(head -n1 "$EGRESS_STATE" 2>/dev/null)"; fi
+
+  # ========== 场景1: 持久化出口地址仍在接口上 -> 钉死 + 健康闸门 ==========
+  if [[ -n "$last_addr" ]] && addr_on_iface "$last_addr"; then
+    local gw
+    gw="$(gw_for_addr "$last_addr")"
+    if [[ -n "$gw" ]]; then
+      ensure_gw_route "$gw"
+      # 强制钉死默认路由到该地址（覆盖 client.sh pinsrc 干扰）
+      if replace_default "$gw" "$last_addr" "1"; then
+        cleanup_backup_defaults
+        if probe_ok "$last_addr"; then
+          fail_reset
+          say "HOLD: pin egress=${last_addr} via=${gw} (healthy)"
+          return 0
+        fi
+        # 探测失败：连续 EGRESS_FAIL_LIMIT 轮才重选，避免瞬时波动导致切换抖动
+        local fc
+        fc="$(fail_inc)"
+        if (( fc >= EGRESS_FAIL_LIMIT )); then
+          say "HOLD probe failed x${fc} on ${last_addr}; re-selecting..."
+          fail_reset
+          # fall through to re-select below
+        else
+          say "HOLD probe failed x${fc}/${EGRESS_FAIL_LIMIT}; keeping pinned ${last_addr} (flap guard)"
+          return 0
+        fi
+      fi
+    fi
+  fi
+
+  # ========== 重选: 动态优先, 原生兜底 ==========
+  if [[ -n "$last_addr" ]]; then
+    say "egress state/link changed or unhealthy, re-selecting..."
+  else
+    say "no egress state yet, selecting..."
+  fi
+
+  local -a CIDRS GWS
+  mapfile -t CIDRS < <(jq -r '.ipv6_cidrs[]?' "$STATE_FILE" 2>/dev/null)
+  mapfile -t GWS   < <(jq -r '.gateways[]?'   "$STATE_FILE" 2>/dev/null)
+  local i addr gw picked=""
+  for i in "${!CIDRS[@]}"; do
+    addr="$(strip_cidr "${CIDRS[$i]}")"
+    addr_on_iface "$addr" || continue
+    gw="${GWS[$i]:-}"; [[ -n "$gw" ]] && ensure_gw_route "$gw"
+    if probe_ok "$addr"; then
+      if replace_default "$gw" "$addr" "1" && probe_fast "$addr"; then
+        picked="$addr"; say "PICK dynamic egress=${addr} via=${gw:-?}"; break
+      fi
+    else
+      say "  candidate dynamic ${addr} unhealthy, skip"
+    fi
+  done
+
+  if [[ -n "$picked" ]]; then
+    echo "$picked" > "$EGRESS_STATE"; fail_reset; cleanup_backup_defaults; return 0
+  fi
+
+  # 原生兜底
+  if [[ -n "$nat_src" ]] && addr_on_iface "$nat_src" && probe_ok "$nat_src"; then
+    [[ -n "$nat_gw" ]] && ensure_gw_route "$nat_gw"
+    if replace_default "$nat_gw" "$nat_src" "$nat_on" && probe_fast "$nat_src"; then
+      echo "$nat_src" > "$EGRESS_STATE"; fail_reset
+      say "PICK native egress=${nat_src} via=${nat_gw}"; cleanup_backup_defaults; return 0
+    fi
+  else
+    [[ -n "$nat_src" ]] && say "  native ${nat_src} unhealthy or not on iface, skip"
+  fi
+
+  say "WARN: no usable egress; keeping current default"
+  return 1
+}
+
+main "$@"

@@ -45,7 +45,7 @@
 
     - name: Test IPv6 egress (HTTPS httpbin)
       ansible.builtin.shell:
-        cmd: "curl -6 -sS --max-time 10 https://api64.ipify.org 2>&1 || echo 'IPv6_EGRESS_FAIL'"
+        cmd: "curl -6 -sS --max-time 10 https://v6.ipinfo.io/ip 2>&1 || echo 'IPv6_EGRESS_FAIL'"
       register: egress
       changed_when: false
       ignore_errors: true

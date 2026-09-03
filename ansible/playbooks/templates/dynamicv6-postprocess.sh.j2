@@ -1,49 +1,65 @@
 #!/bin/bash
-# DynamicV6 容错回退脚本 — 部署到所有 Aether VM
-# 逻辑: 优先使用最后一个下发的动态IPv6; 若网关二层不可达则回退到 VM 原生 IPv6
-# 由 systemd timer 每 2 分钟调用一次 (ExecStartPost)
+# DynamicV6 出口选择脚本（用户新方案·修复版）
+# 服务商脚本已负责下发全部动态 IPv6（ExecStart）。
+# 本脚本仅负责：遍历下发的地址（含原生兜底），逐个设为默认出口并测试，选第一个可用的固定。
+# 不干预服务商脚本的其他配置。
 
-IFACE="{{ dynamicv6_iface | default('eth0') }}"
-STATE_FILE="{{ dynamicv6_state_file | default('/var/lib/dynamicv6/client-eth0.state') }}"
+IFACE="eth0"
+STATE_FILE="/var/lib/dynamicv6/client-eth0.state"
 
-# --- 自动探测: 原生 IPv6 (2602: 开头) 作为回退时使用的源地址 ---
-NATIVE_SRC="$(ip -6 addr show "$IFACE" | grep -oP '2602:[\da-f:]+(?=/)' | head -n1)"
-[ -z "$NATIVE_SRC" ] && NATIVE_SRC="$(ip -6 addr show "$IFACE" | grep -oP '2602:[0-9a-f:]+' | head -n1)"
+# --- 原生 IPv6 源地址：优先 state.native_default.src，兜底从接口探测（不硬编码前缀）---
+NATIVE_SRC="$(jq -r '.native_default.src // empty' "$STATE_FILE" 2>/dev/null)"
+if [ -z "$NATIVE_SRC" ]; then
+  NATIVE_SRC="$(ip -6 addr show "$IFACE" | grep -oP '(?<=inet6 )[0-9a-f:]+(?=/)' \
+    | grep -viE '^(fe80|::1|26[0-9a-f]{2}:)' | head -n1)"
+fi
 
-# --- 自动探测: 可达的链路本地路由器网关 (已解析MAC且非FAILED的 fe80: router) ---
-LLGW="$(ip -6 neigh show dev "$IFACE" 2>/dev/null | awk '$1 ~ /^fe80:/ && $0 ~ /router/ && $0 !~ /FAILED/ {print $1}' | head -n1)"
-[ -z "$LLGW" ] && LLGW="{{ dynamicv6_llgw | default('') }}"
-
-if [[ -z "$NATIVE_SRC" || -z "$LLGW" ]]; then
-  echo "[dp] WARN: cannot determine native_src=$NATIVE_SRC llgw=$LLGW; keeping as-is" >&2
+# --- 原生网关：优先 state.native_default.gateway，否则 EUI-64 计算链路本地网关 ---
+NATIVE_GW="$(jq -r '.native_default.gateway // empty' "$STATE_FILE" 2>/dev/null)"
+LLGW=""
+if [ -n "$NATIVE_GW" ]; then
+  LLGW="$NATIVE_GW"
+else
+  _v4gw="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')"
+  _mac="$(ip neigh show 2>/dev/null | awk -v g="$_v4gw" '$1==g && /eth0/ && /lladdr/ {print $5; exit}')"
+  if [ -n "$_mac" ]; then
+    _h="$(echo "$_mac" | tr -d ':')"
+    _b0="$(( 16#${_h:0:2} ^ 2 ))"
+    _hi="$(printf '%02x' "$_b0")${_h:2:4}"
+    _lo="${_h:6:6}"
+    _h="${_hi}fffe${_lo}"
+    LLGW="fe80::${_h:0:4}:${_h:4:4}:${_h:8:4}:${_h:12:4}"
+  fi
 fi
 
 # --- 清理脚本侧遗留的备用默认路由 (metric>=2048) ---
 for m in 2048 2049 2050; do ip -6 route del default dev "$IFACE" metric "$m" 2>/dev/null; done
 
-# --- 1) 优先最后一个动态 IPv6 ---
-LAST_CIDR="$(jq -r '.ipv6_cidrs[-1] // empty' "$STATE_FILE" 2>/dev/null)"
-LAST_GW="$(jq -r '.gateways[-1] // empty' "$STATE_FILE" 2>/dev/null)"
-LAST_ADDR="${LAST_CIDR%/*}"
-DYN_OK=0
-if [[ -n "$LAST_GW" && -n "$LAST_ADDR" && -n "$NATIVE_SRC" ]]; then
-  ip -6 route replace default via "$LAST_GW" dev "$IFACE" src "$LAST_ADDR" metric 1024 mtu 1280 2>/dev/null
-  # 网关二层可达性检测 (NDP 邻居解析成功且能 ping 通)
-  if ip -6 route get "$LAST_GW" >/dev/null 2>&1 && ip -6 neigh get "$LAST_GW" >/dev/null 2>&1; then
-    if ping6 -c 1 -W 2 "$LAST_GW%${IFACE}" >/dev/null 2>&1; then
-      DYN_OK=1
-      echo "[dp] last dyn OK: $LAST_ADDR via $LAST_GW"
-    fi
-  fi
-fi
+# --- 收集下发地址与其网关（按下发顺序）---
+mapfile -t CIDRS < <(jq -r '.ipv6_cidrs[]' "$STATE_FILE" 2>/dev/null)
+mapfile -t GWS   < <(jq -r '.gateways[]'  "$STATE_FILE" 2>/dev/null)
 
-# --- 2) 失败则回退 VM 原生 IPv6 ---
-if [[ "$DYN_OK" != "1" ]]; then
-  if [[ -n "$NATIVE_SRC" && -n "$LLGW" ]]; then
-    ip -6 route replace default via "$LLGW" dev "$IFACE" src "$NATIVE_SRC" metric 1024 mtu 1280
+# --- 1) 依次尝试每个下发地址作为出口，选第一个能出网的 ---
+PICK=""
+for i in "${!CIDRS[@]}"; do
+  addr="${CIDRS[$i]%/*}"
+  gw="${GWS[$i]:-}"
+  [ -z "$addr" ] || [ -z "$gw" ] && continue
+  ip -6 route replace default via "$gw" dev "$IFACE" src "$addr" onlink metric 1024 mtu 1280 2>/dev/null
+  if curl -6 -sS --connect-timeout 3 --max-time 4 -o /dev/null "https://v6.ipinfo.io/ip" >/dev/null 2>&1; then
+    PICK="$addr|$gw"
+    echo "[dp] picked egress: $addr via $gw"
+    break
+  fi
+done
+
+# --- 2) 若下发地址都不可用，回退原生 IPv6 ---
+if [ -z "$PICK" ]; then
+  if [ -n "$NATIVE_SRC" ] && [ -n "$LLGW" ]; then
+    ip -6 route replace default via "$LLGW" dev "$IFACE" src "$NATIVE_SRC" onlink metric 1024 mtu 1280
     echo "[dp] fallback native: $NATIVE_SRC via $LLGW"
   else
-    echo "[dp] WARN: unable to set native fallback route" >&2
+    echo "[dp] WARN: no usable egress found (native unavailable: src=$NATIVE_SRC gw=$LLGW)" >&2
   fi
 fi
 

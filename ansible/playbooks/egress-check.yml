@@ -1,0 +1,79 @@
+---
+# 手动批量测试：每台 VPS 的 IPv6 出口（严格多端点版 v2, 2026-09-03）
+#
+# 说明：
+#   - 旧版只用 v6.ipinfo.io 单端点且从不检查 curl 退出码 -> 全程 ok 却实际断网(假绿)。
+#   - 本版：对 4 个公共端点做多端点 TCP 探测，任一 HTTP 2xx 即 PASS；
+#     存在 FAIL 节点时 playbook 最终非零退出并列出清单（不再假绿）。
+#   - 同时输出每台当前默认路由与实测出口 IP，便于人工比对。
+#
+# 用法(在 eb 控制端 /opt/remnanode-ansible/ansible 下):
+#   全量:      ansible-playbook -i inventory/production.yml playbooks/egress-check.yml
+#   单台:      ansible-playbook -i inventory/production.yml playbooks/egress-check.yml --limit node-32
+#   指定段:    ansible-playbook -i inventory/production.yml playbooks/egress-check.yml --limit 'node-01,node-02'
+#
+- name: IPv6 egress check per node (multi-endpoint TCP, loud failures)
+  hosts: nodes
+  gather_facts: false
+  vars:
+    iface: eth0
+    state_file: /var/lib/dynamicv6/client-eth0.state
+    probe_urls: "https://one.one.one.one/cdn-cgi/trace https://api6.ipify.org https://v6.ipinfo.io/ip https://www.google.com/generate_204"
+  tasks:
+
+    # --- 服务商下发的动态地址(state 为准) ---
+    - name: Dynamic v6 addresses from vendor state
+      ansible.builtin.shell:
+        cmd: "jq -r '.ipv6_cidrs[]?' {{ state_file }} 2>/dev/null"
+      register: dyn_cidrs
+      changed_when: false
+      ignore_errors: true
+
+    # --- 当前默认 IPv6 路由(via / src) ---
+    - name: Current default IPv6 route
+      ansible.builtin.shell:
+        cmd: "ip -6 route show default metric 1024"
+      register: rt
+      changed_when: false
+      ignore_errors: true
+
+    # --- 多端点 TCP 探测实际出口; 再取一次出口 IP 便于人工核对 ---
+    - name: Probe IPv6 egress (multi-endpoint) and read egress IP
+      ansible.builtin.shell: |
+        ok=0
+        for u in {{ probe_urls }}; do
+          if curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 "$u" >/dev/null 2>&1; then ok=1; break; fi
+        done
+        if [ "$ok" -eq 1 ]; then echo "verdict=PASS"; else echo "verdict=FAIL"; fi
+        ip=""
+        for u in https://api6.ipify.org https://v6.ipinfo.io/ip; do
+          ip=$(curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 "$u" 2>/dev/null) && [ -n "$ip" ] && break
+        done
+        [ -z "$ip" ] && ip=$(curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 https://one.one.one.one/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p')
+        echo "egress-ip: ${ip:-n/a}"
+      register: probe
+      changed_when: false
+
+- name: Aggregate verdicts on controller and exit non-zero if any node dead
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Per-node verdict table
+      ansible.builtin.debug:
+        msg: "{{ item }} => {{ 'FAIL' if (hostvars[item].probe is not defined) or ('verdict=FAIL' in (hostvars[item].probe.stdout | default(''))) else 'PASS' }} | route={{ (hostvars[item].rt.stdout_lines | default(['(unreachable)'])) | join(' ') | regex_replace('.*src ', 'src ') }} | {{ (hostvars[item].probe.stdout_lines | default([])) | select('match', 'egress-ip') | join(' ') }}"
+      loop: "{{ groups['nodes'] }}"
+
+    - name: Collect dead hosts
+      ansible.builtin.set_fact:
+        dead: "{{ (dead | default([])) + [item] }}"
+      loop: "{{ groups['nodes'] }}"
+      when: "((hostvars[item].probe is not defined) or ('verdict=FAIL' in (hostvars[item].probe.stdout | default(''))))"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: "SUMMARY total={{ groups['nodes'] | length }} dead={{ dead | default([]) | length }} dead_hosts={{ dead | default([]) }}"
+
+    - name: Fail loudly when any node has no IPv6 egress
+      ansible.builtin.fail:
+        msg: "IPv6 egress DEAD on {{ dead | default([]) | length }} node(s): {{ dead | default([]) }}"
+      when: "(dead | default([]) | length) > 0"

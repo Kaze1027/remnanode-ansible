@@ -1,0 +1,33 @@
+---
+- name: Rollout egress-picker v3.3 (health-gated HOLD + multi-endpoint TCP probe)
+  hosts: nodes
+  become: true
+  gather_facts: false
+  vars:
+    dynamicv6_bin_dir: /usr/local/bin
+  tasks:
+    - name: Backup current egress-picker (once)
+      ansible.builtin.shell: |
+        if [ ! -f {{ dynamicv6_bin_dir }}/egress-picker.sh.v32.bak ]; then
+          cp {{ dynamicv6_bin_dir }}/egress-picker.sh {{ dynamicv6_bin_dir }}/egress-picker.sh.v32.bak
+        fi
+      changed_when: false
+    - name: Deploy egress-picker.sh v3.3
+      ansible.builtin.template:
+        src: egress-picker.sh.j2
+        dest: "{{ dynamicv6_bin_dir }}/egress-picker.sh"
+        mode: "0755"
+    - name: Clear stale egress pin & fail counter (force immediate healthy re-select)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/dynamicv6/egress-picker.state
+        - /var/lib/dynamicv6/egress-picker.failcount
+    - name: Run egress-picker once to re-select healthy egress
+      ansible.builtin.command: "{{ dynamicv6_bin_dir }}/egress-picker.sh"
+      register: pick
+      changed_when: false
+    - name: Show re-select result
+      ansible.builtin.debug:
+        msg: "{{ pick.stdout_lines | default([]) | join(' | ') }}"

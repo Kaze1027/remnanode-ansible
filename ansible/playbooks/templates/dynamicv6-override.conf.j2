@@ -1,3 +1,3 @@
 [Service]
-Environment=DYNAMICV6_ROUTE_POLICY=replace
-ExecStartPost={{ dynamicv6_bin_dir | default('/usr/local/bin') }}/dynamicv6-postprocess.sh
+Environment=DYNAMICV6_ROUTE_POLICY=preserve
+ExecStartPost={{ dynamicv6_bin_dir | default('/usr/local/bin') }}/egress-picker.sh
