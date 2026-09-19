@@ -4,11 +4,15 @@ node_port_default: 22222                                          # 默认节点
 compose_dir: /opt/remnanode                                       # 节点上 compose 文件目录
 watchtower_schedule: "0 0 4 * * *"                                # 每天 UTC 04:00（北京 12:00）检查更新
 
-# ---- DynamicV6 容错方案（动态IPv6优先, 原生IPv6兜底）----
-dynamicv6_bin_dir: /usr/local/bin                               # 后处理脚本目录
-dynamicv6_iface: eth0                                            # 主网卡（个别机器可能不同，可在 inventory 覆盖）
-dynamicv6_state_file: /var/lib/dynamicv6/client-eth0.state       # 服务商 state 文件路径
-dynamicv6_llgw: ""                                               # 兜底链路本地网关（默认留空，脚本自动探测 fe80: router）
-dynamicv6_client_service: dynamicv6-client.service
-dynamicv6_client_timer: dynamicv6-client.timer
-dynamicv6_script_url: "https://billing.aethercloud.io/dynamicv6/client.sh"
+# ---- IPv6：新客户端 DynamicV6 Next / XepertV6 ----
+# 说明：旧的 DynamicV6 客户端（manager + egress-picker）已退役，
+#       现统一使用服务商新客户端，默认策略 leased（= 交互菜单第 2 项：自动挑选租约）。
+dvn_script_url: "https://aethercloud.io/experimental-ipv6.sh"     # 新客户端脚本地址（旧 dynamicv6/client.sh 会 302 到此）
+dvn_default: "leased"                                             # native | leased | <指定IPv6>
+dvn_iface: eth0                                                   # 主网卡
+
+# ---- 巡检通知（Telegram Bot）----
+# 自行在 @BotFather 创建 bot，拿到 token；chat_id 可用 @userinfobot 或 getUpdates 获取（群组为负数）
+telegram_bot_token: ""                                            # 例: 123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxx
+telegram_chat_id: ""                                              # 例: 123456789 或 -1001234567890
+dvn_quota_warn_pct: 85                                            # 周配额用量超过该百分比时告警

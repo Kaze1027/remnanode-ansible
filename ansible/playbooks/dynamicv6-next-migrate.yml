@@ -1,0 +1,155 @@
+---
+# ============================================================================
+# dynamicv6-next-migrate.yml
+#   把所有节点从「旧 DynamicV6 客户端(manager + egress-picker)」
+#   迁移到「新客户端 XepertV6 / DynamicV6 Next」，统一策略：
+#        --default leased        （= 交互菜单第 2 项「自动挑选租约」）
+#
+# 设计要点（源于 2026-09-18 试点实测）：
+#   1) 新客户端 preflight 会把「接口上存在、但不在自己 state 账本里的 /128」
+#      判定为 non-managed 冲突 → 永远 sync failed、永不接管。
+#      因此安装后必须清理旧客户端遗留的动态 /128（以及旧 metric 1023 路由、
+#      16000-16031 旧规则/表）。试点机 us1.flux.rest 验证：清理后立即接管。
+#   2) install 会自动 stop+disable 并删除 dynamicv6-client.service/.timer、
+#      删除 /var/lib/dynamicv6/client-<iface>.state（旧 state）。
+#   3) 幂等：已迁移完成（service active 且 state.json 有地址）的节点默认跳过；
+#      需要强制重做时加 -e dvn_force=1
+#
+# 用法（在 eb: /opt/remnanode-ansible/ansible 下）：
+#   试点 1 台:  ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-migrate.yml --limit node-25
+#   试点 3 台:  ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-migrate.yml --limit 'node-17,node-25,node-32'
+#   全量:       ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-migrate.yml
+#   报表:       ... | tee /tmp/dvn-migrate-$(date +%F-%H%M).log
+# ============================================================================
+- name: Migrate Aether IPv6 to new client (dynamicv6-next, --default leased)
+  hosts: nodes
+  become: true
+  gather_facts: false
+  serial: 3                     # 每批 3 台，降低同时切换风险
+  vars:
+    dvn_url: "https://aethercloud.io/experimental-ipv6.sh"
+    dvn_default: "leased"       # 菜单第 2 项
+    dvn_iface: eth0
+    dvn_legacy_dir: /var/lib/dynamicv6
+    dvn_state_dir: /var/lib/dynamicv6-next-guest
+  tasks:
+
+    # ---------------- 0. 预检 ----------------
+    - name: "Preflight: python3>=3.8(ssl) / iproute2 JSON / CA"
+      ansible.builtin.shell: |
+        set -e
+        python3 -c 'import ssl,sys; sys.exit(0 if sys.version_info >= (3,8) else 1)' \
+          || { echo "FAIL: python3>=3.8 with ssl required"; exit 1; }
+        ip -j link show >/dev/null || { echo "FAIL: iproute2 without JSON support"; exit 1; }
+        for b in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+          [ -s "$b" ] && { echo "preflight OK"; exit 0; }
+        done
+        echo "FAIL: no CA bundle"; exit 1
+      register: dvn_pre
+      changed_when: false
+
+    # ---------------- 1. 是否已迁移（幂等守卫） ----------------
+    - name: "Check whether already migrated"
+      ansible.builtin.shell: |
+        st=$(systemctl is-active dynamicv6-next-guest.service 2>/dev/null || echo inactive)
+        n=$(jq -r '.addresses | length' {{ dvn_state_dir }}/state.json 2>/dev/null || echo 0)
+        if [ "$st" = "active" ] && [ "${n:-0}" -gt 0 ]; then echo "MIGRATED"; else echo "TODO"; fi
+      register: dvn_state_chk
+      changed_when: false
+
+    # ---------------- 2. 备份（迁移前，保留退路/对照） ----------------
+    - name: "Backup legacy state + current network"
+      ansible.builtin.shell: |
+        BK=/root/dvn-legacy-backup-$(date +%Y%m%d-%H%M%S)
+        mkdir -p "$BK"
+        cp -a {{ dvn_legacy_dir }}     "$BK"/ 2>/dev/null || true
+        cp -a {{ dvn_state_dir }}      "$BK"/ 2>/dev/null || true
+        ip -6 addr  show dev {{ dvn_iface }} scope global > "$BK/ip6-addr.before"
+        ip -6 route show                                  > "$BK/ip6-route.before"
+        ip -6 rule  show                                  > "$BK/ip6-rule.before"
+        echo "$BK"
+      register: dvn_bk
+      changed_when: false
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    # ---------------- 3. 采集旧动态 /128（必须在 install 之前，旧 state 会被删） ----------------
+    - name: "Record legacy dynamic /128 addresses"
+      ansible.builtin.shell: |
+        { jq -r '.ipv6_cidrs[]?' {{ dvn_legacy_dir }}/client-{{ dvn_iface }}.state 2>/dev/null | cut -d/ -f1
+          ip -6 -o addr show dev {{ dvn_iface }} scope global | awk '$4 ~ /\/128$/ {sub(/\/128$/,"",$4); print $4}'
+        } | sed '/^$/d' | sort -u
+      register: dvn_legacy_addrs
+      changed_when: false
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    # ---------------- 4. 下载并安装（非交互 + --default leased） ----------------
+    - name: "Download client script"
+      ansible.builtin.shell: "curl -4 -fsSL --max-time 30 {{ dvn_url }} -o /tmp/dvn.sh && chmod 700 /tmp/dvn.sh"
+      changed_when: false
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    - name: "Install client (--default {{ dvn_default }})"
+      ansible.builtin.command: "bash /tmp/dvn.sh install --interface {{ dvn_iface }} --default {{ dvn_default }}"
+      register: dvn_inst
+      changed_when: true
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    # ---------------- 5. 清残留（关键修复，见文件头说明） ----------------
+    - name: "Remove legacy leftover /128 addresses"
+      ansible.builtin.shell: |
+        for a in {{ dvn_legacy_addrs.stdout_lines | default([]) | join(' ') }}; do
+          ip -6 addr del "$a/128" dev {{ dvn_iface }} 2>/dev/null || true
+        done
+      changed_when: false
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    - name: "Remove legacy metric 1023 gateway host routes"
+      ansible.builtin.shell: |
+        ip -6 route show | grep -E 'metric 1023' | while read -r r; do ip -6 route del $r 2>/dev/null || true; done
+      changed_when: false
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    - name: "Remove legacy policy rules/tables 16000-16031"
+      ansible.builtin.shell: |
+        for i in $(seq 0 31); do
+          ip -6 rule  del pref $((16000+i))    2>/dev/null || true
+          ip -6 route flush table $((16000+i)) 2>/dev/null || true
+        done
+      changed_when: false
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    - name: "Wait one reconcile cycle"
+      ansible.builtin.command: sleep 20
+      changed_when: false
+      when: dvn_state_chk.stdout == 'TODO' or (dvn_force | default(0) | int) == 1
+
+    # ---------------- 6. 验收 ----------------
+    - name: "Verify client takeover"
+      ansible.builtin.shell: |
+        st=$(systemctl is-active dynamicv6-next-guest.service 2>/dev/null || echo inactive)
+        addr=$(jq -r '.addresses | keys | join(",")' {{ dvn_state_dir }}/state.json 2>/dev/null)
+        mdyn=$(jq -r '.main_dynamic // ""' {{ dvn_state_dir }}/state.json 2>/dev/null)
+        rule=$(ip -6 rule show | grep -cE '^(20000|2[1-9][0-9]{3}):' || true)
+        def99=$(ip -6 route show default | grep -c 'metric 99' || true)
+        fails=$(journalctl -u dynamicv6-next-guest.service --since '90 seconds ago' --no-pager 2>/dev/null | grep -c 'sync failed' || true)
+        echo "service=$st addresses=${addr:-none} main_dynamic=${mdyn:-none} rules=$rule metric99=$def99 sync_fail_90s=$fails"
+        if [ "$st" = "active" ] && [ -n "$addr" ] && [ -n "$mdyn" ] && [ "$def99" -ge 1 ]; then echo "VERDICT=PASS"; else echo "VERDICT=FAIL"; fi
+      register: dvn_verify
+      changed_when: false
+
+    - name: "Assert migration verdict"
+      ansible.builtin.assert:
+        that:
+          - "'VERDICT=PASS' in dvn_verify.stdout"
+        fail_msg: "{{ inventory_hostname }} 迁移未通过: {{ dvn_verify.stdout }}"
+        success_msg: "{{ inventory_hostname }} OK: {{ dvn_verify.stdout }}"
+
+    # ---------------- 7. 逐台报告 ----------------
+    - name: "Report"
+      ansible.builtin.debug:
+        msg: >-
+          [{{ inventory_hostname }}]
+          state={{ dvn_state_chk.stdout }}
+          backup={{ dvn_bk.stdout | default('(skipped)') }}
+          legacy_128={{ dvn_legacy_addrs.stdout_lines | default([]) | join(',') or 'none' }}
+          {{ dvn_verify.stdout }}

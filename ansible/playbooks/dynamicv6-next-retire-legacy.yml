@@ -1,0 +1,66 @@
+---
+# ============================================================================
+# dynamicv6-next-retire-legacy.yml
+#   新客户端迁移完成后的收尾：清理旧 DynamicV6 组件
+#   （dynamicv6-manager / egress-picker / 旧 state / 孤儿 systemd drop-in）
+#
+# 安全门：仅当 dynamicv6-next-guest.service = active 时才执行清理。
+#
+# 用法（eb: /opt/remnanode-ansible/ansible）：
+#   单台验证: ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-retire-legacy.yml --limit node-01
+#   全量:     ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-retire-legacy.yml
+# ============================================================================
+- name: Retire legacy DynamicV6 artifacts (manager / egress-picker / old units)
+  hosts: nodes
+  become: true
+  gather_facts: false
+  serial: 10
+  tasks:
+
+    - name: "Safety gate: new client must be active"
+      ansible.builtin.shell: systemctl is-active dynamicv6-next-guest.service
+      register: dvn_next_state
+      changed_when: false
+      failed_when: dvn_next_state.stdout != 'active'
+
+    - name: "Remove legacy scripts (manager / egress-picker / old client cache)"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/dynamicv6-manager.sh
+        - /usr/local/bin/egress-picker.sh
+        - /usr/local/bin/egress-picker.sh.v32.bak
+        - /usr/local/bin/egress-picker-v3.2.sh
+        - /usr/local/bin/dynamicv6-client.sh
+        - /usr/local/bin/dynamicv6-postprocess.sh
+
+    - name: "Remove legacy state dir and orphan systemd drop-in"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/dynamicv6
+        - /etc/systemd/system/dynamicv6-client.service.d
+
+    - name: "Clear failed state of legacy units"
+      ansible.builtin.shell: systemctl reset-failed dynamicv6-client.service dynamicv6-client.timer 2>/dev/null || true
+      changed_when: false
+
+    - name: "daemon-reload"
+      ansible.builtin.shell: systemctl daemon-reload
+      changed_when: false
+
+    - name: "Post-check"
+      ansible.builtin.shell: >
+        echo "new=$(systemctl is-active dynamicv6-next-guest.service)
+        old=$(systemctl is-active dynamicv6-client.service 2>/dev/null || echo gone)
+        legacy_files=$(ls /usr/local/bin/dynamicv6-manager.sh /usr/local/bin/egress-picker.sh 2>/dev/null | wc -l)
+        legacy_state=$([ -d /var/lib/dynamicv6 ] && echo present || echo gone)"
+      register: dvn_retire_check
+      changed_when: false
+      failed_when: false
+
+    - name: "Report"
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} {{ dvn_retire_check.stdout }}"
