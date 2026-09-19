@@ -103,11 +103,18 @@
         - tg_token | length > 0
         - tg_chat | length > 0
       no_log: true
+      ignore_errors: true
       register: dvn_tg
 
     - name: Telegram send result
       ansible.builtin.debug:
-        msg: "Telegram: {{ 'sent' if (dvn_tg is defined and (dvn_tg.status | default(0)) == 200) else ('skipped (token/chat_id 未配置)' if (tg_token | length == 0 or tg_chat | length == 0) else 'FAILED') }}"
+        msg: >-
+          Telegram:
+          {%- if tg_token | length == 0 or tg_chat | length == 0 %} skipped (token/chat_id 未配置)
+          {%- elif dvn_tg is defined and (dvn_tg.status | default(0)) == 200 %} sent OK
+          {%- else %} FAILED -> {{ dvn_tg.msg | default('unknown')
+            | regex_replace('https://api.telegram.org/bot[^ ]*', 'https://api.telegram.org/bot<TOKEN>') }}
+          {%- endif %}
 
     - name: Fail when problems found (需 -e dvn_check_fail_hard=1)
       ansible.builtin.fail:
