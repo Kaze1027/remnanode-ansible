@@ -1,0 +1,11 @@
+# 公共变量（可提交）：节点/镜像 + DynamicV6 Next 客户端参数
+node_image: ghcr.io/kaze1027/remnanode-ansible/remnanode:3.2.2   # 固定 3.2.2 版本镜像
+node_port_default: 22222                                          # 默认节点端口，每台可用 node_port 覆盖
+compose_dir: /opt/remnanode                                       # 节点上 compose 文件目录
+watchtower_schedule: "0 0 4 * * *"                                # 每天 UTC 04:00（北京 12:00）检查更新
+
+# ---- IPv6：新客户端 DynamicV6 Next / XepertV6 ----
+dvn_script_url: "https://aethercloud.io/experimental-ipv6.sh"     # 新客户端脚本地址
+dvn_default: "leased"                                             # native | leased | <指定IPv6>
+dvn_iface: eth0                                                   # 主网卡
+dvn_quota_warn_pct: 85                                            # 周配额用量告警阈值(%)

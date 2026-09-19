@@ -1,3 +1,4 @@
 /.local/
 README.md
 /ansible/inventory/production.yml
+ansible/playbooks/group_vars/all/90-secret.yml
