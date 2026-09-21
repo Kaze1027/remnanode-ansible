@@ -33,6 +33,9 @@
     dvn_legacy_dir: /var/lib/dynamicv6
     dvn_state_dir: /var/lib/dynamicv6-next-guest
   tasks:
+    - name: Skip non-Aether hosts (dvn_managed=false)
+      ansible.builtin.meta: end_host
+      when: not (dvn_managed | default(true) | bool)
 
     # ---------------- 0. 预检 ----------------
     - name: "Preflight: python3>=3.8(ssl) / iproute2 JSON / CA"

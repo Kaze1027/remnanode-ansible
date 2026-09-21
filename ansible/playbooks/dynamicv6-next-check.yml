@@ -20,6 +20,9 @@
   vars:
     dvn_probe_urls: "https://one.one.one.one/cdn-cgi/trace https://api6.ipify.org https://v6.ipinfo.io/ip"
   tasks:
+    - name: Skip non-Aether hosts (dvn_managed=false)
+      ansible.builtin.meta: end_host
+      when: not (dvn_managed | default(true) | bool)
     - name: "Gather status (JSON)"
       ansible.builtin.shell: |
         H=$(hostname)

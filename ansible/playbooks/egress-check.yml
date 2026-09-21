@@ -20,6 +20,9 @@
     state_file: /var/lib/dynamicv6/client-eth0.state
     probe_urls: "https://one.one.one.one/cdn-cgi/trace https://api6.ipify.org https://v6.ipinfo.io/ip https://www.google.com/generate_204"
   tasks:
+    - name: Skip non-Aether hosts (dvn_managed=false)
+      ansible.builtin.meta: end_host
+      when: not (dvn_managed | default(true) | bool)
 
     # --- 服务商下发的动态地址(state 为准) ---
     - name: Dynamic v6 addresses from vendor state

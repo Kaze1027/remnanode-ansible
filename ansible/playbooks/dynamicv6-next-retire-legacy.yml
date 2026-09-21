@@ -16,6 +16,9 @@
   gather_facts: false
   serial: 10
   tasks:
+    - name: Skip non-Aether hosts (dvn_managed=false)
+      ansible.builtin.meta: end_host
+      when: not (dvn_managed | default(true) | bool)
 
     - name: "Safety gate: new client must be active"
       ansible.builtin.shell: systemctl is-active dynamicv6-next-guest.service
