@@ -1,0 +1,138 @@
+---
+# ============================================================================
+# ddns-hub-setup.yml —— 在 eb 上部署 DDNS 中枢
+#   1) 由 inventory 生成白名单 records.json + 每台节点的独立 HMAC 密钥 secrets.json
+#   2) 部署 /usr/local/bin/ddns-hub.py + systemd 服务（阿里云 key 复用 Caddy 的 .env）
+#   3) 在 Caddy 的 host.awso.cloud:8443 站点下挂 /ddns/* 反代
+#
+# 用法（在 eb: /opt/remnanode-ansible/ansible）：
+#   ansible-playbook -i inventory/production.yml playbooks/ddns-hub-setup.yml
+# ============================================================================
+- name: Deploy DDNS hub on eb
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ddns_zone: awso.cloud
+    ddns_dir: /etc/ddns-hub
+    ddns_listen: "172.18.0.1:8787"
+    ddns_caddyfile: /opt/remnawave/caddy/Caddyfile
+    ddns_caddy_host: host.awso.cloud
+    ddns_caddy_upstream: "172.18.0.1:8787"
+    ddns_caddy_existing: "    reverse_proxy * http://remnawave:3000"
+  tasks:
+    - name: 确定纳管主机（仅 awso.cloud 后缀）
+      ansible.builtin.set_fact:
+        ddns_hosts: "{{ groups['nodes'] | map('extract', hostvars, 'ansible_host') | select('defined') | select('search', '\\.' + ddns_zone + '$') | list }}"
+
+    - name: 生成 records.json / secrets.json（幂等，密钥文件保留）
+      ansible.builtin.shell: |
+        set -e
+        python3 - <<'PY'
+        import json, os, pathlib
+        hosts = {{ ddns_hosts | to_json }}
+        zone = "{{ ddns_zone }}"
+        d = pathlib.Path("{{ ddns_dir }}"); d.mkdir(parents=True, exist_ok=True)
+        sdir = d / "secrets"; sdir.mkdir(exist_ok=True)
+        records, secrets = {}, {}
+        for h in hosts:
+            records[h] = {"zone": zone, "rr": h[: -(len(zone) + 1)]}
+            f = sdir / h
+            if not f.exists():
+                f.write_text(os.urandom(24).hex()); os.chmod(f, 0o600)
+            secrets[h] = f.read_text().strip()
+        (d / "records.json").write_text(json.dumps(records, indent=2, ensure_ascii=False))
+        (d / "secrets.json").write_text(json.dumps(secrets, indent=2, ensure_ascii=False))
+        os.chmod(d / "records.json", 0o600); os.chmod(d / "secrets.json", 0o600)
+        print(f"records={len(records)} secrets={len(secrets)}")
+        PY
+      register: ddns_gen
+      changed_when: true
+
+    - name: 部署 ddns-hub.py
+      ansible.builtin.copy:
+        src: files/ddns-hub.py
+        dest: /usr/local/bin/ddns-hub.py
+        mode: "0755"
+
+    - name: 部署 systemd 服务
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ddns-hub.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=DDNS hub (nodes -> Aliyun DNS)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          EnvironmentFile=/opt/remnawave/caddy/.env
+          Environment=DDNS_LISTEN={{ ddns_listen }}
+          Environment=DDNS_RECORDS_FILE={{ ddns_dir }}/records.json
+          Environment=DDNS_SECRETS_FILE={{ ddns_dir }}/secrets.json
+          ExecStart=/usr/bin/python3 /usr/local/bin/ddns-hub.py
+          Restart=always
+          RestartSec=3
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: 启动 ddns-hub
+      ansible.builtin.systemd:
+        name: ddns-hub.service
+        enabled: true
+        state: restarted
+        daemon_reload: true
+
+    - name: 本地健康检查
+      ansible.builtin.uri:
+        url: "http://{{ ddns_listen }}/healthz"
+        return_content: true
+      register: ddns_health
+      retries: 5
+      delay: 2
+      until: ddns_health.status == 200
+
+    - name: 在 Caddy 中挂载 /ddns/*
+      ansible.builtin.shell: |
+        set -e
+        python3 - <<'PY'
+        import pathlib
+        p = pathlib.Path("{{ ddns_caddyfile }}")
+        t = p.read_text()
+        if '/ddns/*' in t:
+            print('already-patched'); raise SystemExit(0)
+        old = "{{ ddns_caddy_existing }}"
+        if old not in t:
+            print('PATTERN-NOT-FOUND'); raise SystemExit(1)
+        new = ("    handle_path /ddns/* {\n"
+               "        reverse_proxy {{ ddns_caddy_upstream }}\n"
+               "    }\n"
+               "    handle {\n"
+               "        reverse_proxy * http://remnawave:3000\n"
+               "    }")
+        p.write_text(t.replace(old, new, 1))
+        print('patched')
+        PY
+        docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+      register: ddns_caddy_patch
+      changed_when: "'patched' in ddns_caddy_patch.stdout"
+
+    - name: 经 Caddy 对外健康检查
+      ansible.builtin.uri:
+        url: "https://{{ ddns_caddy_host }}:8443/ddns/healthz"
+        return_content: true
+      register: ddns_ext
+      retries: 3
+      delay: 3
+      until: ddns_ext.status == 200
+      failed_when: false
+
+    - name: 报告
+      ansible.builtin.debug:
+        msg:
+          - "generated: {{ ddns_gen.stdout | default('') }}"
+          - "local    : {{ ddns_health.content | default('') }}"
+          - "via TLS  : {{ ddns_ext.content | default(ddns_ext.msg | default('n/a')) }}"
+          - "hosts    : {{ ddns_hosts | length }}"

@@ -1,0 +1,90 @@
+---
+# ============================================================================
+# ddns-agent-deploy.yml —— 给节点部署 DDNS 上报代理（仅 awso.cloud 主机）
+#   探测公网 IPv4 + 原生 IPv6 → 变化时 HMAC 签名上报到 eb 的 ddns-hub
+#   systemd timer：开机 90s 后首次，之后每 5 分钟
+#
+# 用法（eb: /opt/remnanode-ansible/ansible）：
+#   单台: ansible-playbook -i inventory/production.yml playbooks/ddns-agent-deploy.yml --limit node-03
+#   全量: ansible-playbook -i inventory/production.yml playbooks/ddns-agent-deploy.yml
+# ============================================================================
+- name: Deploy DDNS agent on Aether/native nodes
+  hosts: nodes
+  become: true
+  gather_facts: false
+  vars:
+    ddns_hub_url: "https://host.awso.cloud:8443/ddns/update"
+    ddns_secret_dir: /etc/ddns-hub/secrets
+  tasks:
+    - name: 跳过非 awso.cloud 主机（如 flux.rest 中转机）
+      ansible.builtin.meta: end_host
+      when: not (ansible_host | default('') | regex_search('\\.awso\\.cloud$'))
+
+    - name: 部署 ddns-agent.sh
+      ansible.builtin.copy:
+        src: files/ddns-agent.sh
+        dest: /usr/local/bin/ddns-agent.sh
+        mode: "0755"
+
+    - name: 读取该主机的 HMAC 密钥（控制器侧，与 hub 一致）
+      ansible.builtin.set_fact:
+        ddns_secret: "{{ lookup('file', ddns_secret_dir + '/' + ansible_host) | trim }}"
+
+    - name: 写入 /etc/ddns-agent.env
+      ansible.builtin.copy:
+        dest: /etc/ddns-agent.env
+        mode: "0600"
+        content: |
+          DDNS_HOST={{ ansible_host }}
+          DDNS_SECRET={{ ddns_secret }}
+          DDNS_HUB_URL={{ ddns_hub_url }}
+          DDNS_IFACE=eth0
+      no_log: true
+
+    - name: 部署 service + timer
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/ddns-agent.{{ item.ext }}"
+        mode: "0644"
+        content: "{{ item.content }}"
+      loop:
+        - ext: service
+          content: |
+            [Unit]
+            Description=DDNS agent (report public IPv4 + native IPv6)
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            Type=oneshot
+            EnvironmentFile=/etc/ddns-agent.env
+            ExecStart=/usr/local/bin/ddns-agent.sh
+        - ext: timer
+          content: |
+            [Unit]
+            Description=Run DDNS agent periodically
+
+            [Timer]
+            OnBootSec=90s
+            OnUnitActiveSec=5min
+            AccuracySec=30s
+            Persistent=true
+
+            [Install]
+            WantedBy=timers.target
+
+    - name: 启用并启动 timer
+      ansible.builtin.systemd:
+        name: ddns-agent.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: 立即执行一次（首次会直接上报）
+      ansible.builtin.command: /usr/local/bin/ddns-agent.sh
+      register: ddns_first
+      changed_when: false
+      failed_when: false
+
+    - name: 报告
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}) -> {{ ddns_first.stdout | default('') | replace('\n', ' | ') }}"
