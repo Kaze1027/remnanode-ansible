@@ -41,17 +41,45 @@
         state: directory
         mode: "0755"
 
-    - name: 运行 IPQuality（异步，最长 16 分钟）
+    - name: 预装依赖（避免脚本自行 apt 安装导致超时）
+      ansible.builtin.apt:
+        name:
+          - curl
+          - jq
+          - bc
+          - netcat-openbsd
+          - dnsutils
+          - iproute2
+          - ca-certificates
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: 下载 IPQuality 脚本（缓存复用；dash 下不能用 <(...) 进程替换）
       ansible.builtin.shell: |
-        timeout 900 bash <(curl -Ls {{ ipq_url }}) -f -j > {{ ipq_raw }} 2>/dev/null || true
-        if [ ! -s {{ ipq_raw }} ]; then echo "NO_OUTPUT"; exit 1; fi
+        curl -Ls --max-time 60 {{ ipq_url }} -o /usr/local/bin/ipq.sh
+        chmod 755 /usr/local/bin/ipq.sh
+        echo "script_bytes=$(wc -c < /usr/local/bin/ipq.sh)"
+      args:
+        executable: /bin/bash
+      register: ipq_dl
+      changed_when: false
+      failed_when: false
+
+    - name: 运行 IPQuality（异步，最长 20 分钟）
+      ansible.builtin.shell: |
+        timeout 900 bash /usr/local/bin/ipq.sh -f -j > {{ ipq_raw }} 2>{{ ipq_dir }}/latest.err || true
+        if [ ! -s {{ ipq_raw }} ]; then
+          echo "NO_OUTPUT err=$(tail -c 300 {{ ipq_dir }}/latest.err | tr '\n' ' ')"
+          exit 1
+        fi
         cp -f {{ ipq_raw }} {{ ipq_dir }}/latest.json
         echo "bytes=$(wc -c < {{ ipq_raw }})"
       args:
         executable: /bin/bash
       register: ipq_run
-      async: 960
-      poll: 15
+      async: 1200
+      poll: 20
       changed_when: false
       failed_when: false
 
