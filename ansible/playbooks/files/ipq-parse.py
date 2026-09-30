@@ -1,16 +1,47 @@
 #!/usr/bin/env python3
 """
-解析 xykt/IPQuality 的 JSON 输出（可能带赞助商 banner，可能是 IPv4+IPv6 多段对象），
-输出紧凑单行（每段一行）：
-    <host> [v4|v6] <IP> | <Organization>\\<Region.Name>-<City.Name>\\<Type> | <Media 摘要>
+解析 xykt/IPQuality 的 JSON 输出，生成【人类可读】的分行文本（供 Telegram 推送）。
+
+每台节点输出形如：
+
+    ▎us1.awso.cloud
+    v4 · 23.147.120.204 · TAIPEI101 NETWORK LLC · 美国·North Kansas City · 原生IP · ✅ 全解锁（7/7）
+    v6 · 2600:1700:2bc1:409d:8::f80d · AT&T Enterprises, LLC · 美国·Warrenville · 原生IP · ⚠️ TikTok✖ Prime✘ ｜ 其余5项解锁
+
+媒体只在有异常时列出异常项，避免一长串 ✔ 干扰阅读；地区优先用中文名。
 """
 import json
 import sys
 
-SHORT = [("TikTok", "TikTok"), ("DisneyPlus", "Disney"), ("Netflix", "Netflix"),
-         ("Youtube", "YouTube"), ("AmazonPrimeVideo", "Prime"), ("Reddit", "Reddit"),
-         ("ChatGPT", "ChatGPT")]
+SERVICES = [
+    ("TikTok", "TikTok"),
+    ("DisneyPlus", "Disney+"),
+    ("Netflix", "Netflix"),
+    ("Youtube", "YouTube"),
+    ("AmazonPrimeVideo", "Prime"),
+    ("Reddit", "Reddit"),
+    ("ChatGPT", "ChatGPT"),
+]
 SYM = {"解锁": "✔", "屏蔽": "✘", "失败": "✖"}
+PLACEHOLDER = {"", "null", "none", "n/a", "na"}
+
+REGION_ZH = {
+    "US": "美国", "CA": "加拿大", "MX": "墨西哥", "BR": "巴西", "AR": "阿根廷",
+    "CL": "智利", "CO": "哥伦比亚", "PE": "秘鲁",
+    "GB": "英国", "IE": "爱尔兰", "FR": "法国", "DE": "德国", "NL": "荷兰",
+    "BE": "比利时", "LU": "卢森堡", "CH": "瑞士", "AT": "奥地利", "IT": "意大利",
+    "ES": "西班牙", "PT": "葡萄牙", "SE": "瑞典", "NO": "挪威", "DK": "丹麦",
+    "FI": "芬兰", "IS": "冰岛", "PL": "波兰", "CZ": "捷克", "SK": "斯洛伐克",
+    "HU": "匈牙利", "RO": "罗马尼亚", "BG": "保加利亚", "GR": "希腊", "UA": "乌克兰",
+    "RU": "俄罗斯", "LT": "立陶宛", "LV": "拉脱维亚", "EE": "爱沙尼亚",
+    "TR": "土耳其", "IL": "以色列", "AE": "阿联酋", "SA": "沙特阿拉伯", "EG": "埃及",
+    "ZA": "南非", "NG": "尼日利亚", "KE": "肯尼亚",
+    "CN": "中国", "HK": "中国香港", "TW": "中国台湾", "MO": "中国澳门",
+    "JP": "日本", "KR": "韩国", "SG": "新加坡", "MY": "马来西亚", "TH": "泰国",
+    "VN": "越南", "PH": "菲律宾", "ID": "印度尼西亚", "IN": "印度", "PK": "巴基斯坦",
+    "BD": "孟加拉国", "LK": "斯里兰卡", "NP": "尼泊尔",
+    "AU": "澳大利亚", "NZ": "新西兰",
+}
 
 
 def load_objects(raw):
@@ -30,40 +61,62 @@ def load_objects(raw):
     return objs
 
 
-def media_str(media):
+def clean(value):
+    text = str(value if value is not None else "").strip()
+    return "-" if text.lower() in PLACEHOLDER else text
+
+
+def region_text(info):
+    region = info.get("Region") or {}
+    code = clean(region.get("Code"))
+    name = clean(region.get("Name"))
+    if code != "-" and code in REGION_ZH:
+        return REGION_ZH[code]
+    return name
+
+
+def media_text(media):
     media = media or {}
-    parts = []
-    for key, short in SHORT:
-        m = media.get(key) or {}
-        status = str(m.get("Status") or "?")
-        region = str(m.get("Region") or "")
-        sym = SYM.get(status, "?")
-        if status == "解锁" and region:
-            parts.append(f"{short}{sym}{region}")
+    bad, ok = [], 0
+    for key, label in SERVICES:
+        item = media.get(key) or {}
+        status = str(item.get("Status") or "?").strip()
+        if status == "解锁":
+            ok += 1
         else:
-            parts.append(f"{short}{sym}")
-    return " ".join(parts)
+            bad.append(f"{label}{SYM.get(status, '?')}")
+    if ok == len(SERVICES):
+        return f"✅ 全解锁（{ok}/{len(SERVICES)}）"
+    suffix = f" ｜ 其余{ok}项解锁" if ok else ""
+    return "⚠️ " + " ".join(bad) + suffix
 
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ipq-raw.json"
     host = sys.argv[2] if len(sys.argv) > 2 else "unknown"
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        raw = fh.read()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        print(f"▎{host}")
+        print(f"⚠️ 采集失败：无法读取结果文件（{exc}）")
+        return 1
     objs = load_objects(raw)
+    print(f"▎{host}")
     if not objs:
-        print(f"{host} | PARSE-FAIL | 无有效 JSON（脚本可能失败）")
+        print("⚠️ 采集失败：未取到有效 JSON（可查看 /var/lib/ipquality/latest.err）")
         return 1
     for obj in objs:
         head = obj.get("Head") or {}
         info = obj.get("Info") or {}
-        ip = str(head.get("IP") or "?")
-        fam = "v6" if ":" in ip else "v4"
-        org = str(info.get("Organization") or "?")
-        region = str((info.get("Region") or {}).get("Name") or "?")
-        city = str((info.get("City") or {}).get("Name") or "?")
-        typ = str(info.get("Type") or "?")
-        print(f"{host} [{fam}] {ip} | {org}\\{region}-{city}\\{typ} | {media_str(obj.get('Media'))}")
+        ip = clean(head.get("IP"))
+        family = "v6" if ":" in ip else "v4"
+        org = clean(info.get("Organization"))
+        region = region_text(info)
+        city = clean((info.get("City") or {}).get("Name"))
+        kind = clean(info.get("Type"))
+        place = f"{region}·{city}" if city != "-" else region
+        print(f"{family} · {ip} · {org} · {place} · {kind} · {media_text(obj.get('Media'))}")
     return 0
 
 

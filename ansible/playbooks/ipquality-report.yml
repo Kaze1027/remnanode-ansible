@@ -1,19 +1,19 @@
 ---
 # ============================================================================
-# ipquality-report.yml —— 用 xykt/IPQuality 采集每台节点的 IP 质量，
-#   裁剪为紧凑单行并推送 Telegram：
-#       <host> [v4|v6] <IP> | <Organization>\<Region>-<City>\<Type> | <Media 摘要>
+# ipquality-report.yml —— xykt/IPQuality IP 质量巡检（可读版推送）
 #
-#   性能事实（实测）：
-#     - 脚本自身单机 ~100 秒（与 -n/-p 无关），瓶颈在最慢节点
-#     - 因此全并行即可，无需错峰（实测 43 台并行未出现 null/失真）
-#     - apt 依赖阶段只在缺失时执行（省时间）
+# 每台节点输出可读文本（由 files/ipq-parse.py 生成）：
+#     ▎us1.awso.cloud
+#     v4 · 23.147.120.204 · TAIPEI101 NETWORK LLC · 美国·North Kansas City · 原生IP · ✅ 全解锁（7/7）
+#     v6 · 2600:1700:2bc1:409d:8::f80d · AT&T Enterprises, LLC · …·Warrenville · 原生IP · ⚠️ TikTok✖ Prime✘
+# 消息按「每片 8 台节点」切分，首片带汇总统计。
 #
-#   全并行（推荐，约 3~5 分钟）：
-#     ansible-playbook -i inventory/production.yml playbooks/ipquality-report.yml \
-#       -e ipq_serial=43 -f 43
-#   保守（默认 serial=6）：
-#     ansible-playbook -i inventory/production.yml playbooks/ipquality-report.yml
+# 用法（eb: /opt/remnanode-ansible/ansible）：
+#   全并行（推荐，约 4 分钟）：
+#     ansible-playbook -i inventory/production.yml playbooks/ipquality-report.yml -e ipq_serial=43 -f 43
+#   保守（默认 serial=6）：直接跑
+#   单台 / 不发 TG：  --limit node-18 -e ipq_notify=0
+#   只看 IPv4：       -e ipq_cli_flags='-4 -f -n -p -j'
 # ============================================================================
 - name: Collect IP quality per node (xykt/IPQuality)
   hosts: nodes
@@ -51,13 +51,6 @@
         state: directory
         mode: "0755"
 
-    - name: 错峰启动（可选；实测无需，默认 0）
-      ansible.builtin.shell: sleep $(( RANDOM % {{ ipq_jitter | default(0) | int }} ))
-      args:
-        executable: /bin/bash
-      changed_when: false
-      when: (ipq_jitter | default(0) | int) > 0
-
     - name: 检查依赖是否齐全
       ansible.builtin.shell: >-
         dpkg-query -W -f='${Status}\n' {{ ipq_pkgs | join(' ') }} 2>/dev/null
@@ -68,7 +61,7 @@
       changed_when: false
       failed_when: false
 
-    - name: 安装缺失依赖（仅在缺失时）
+    - name: 安装缺失依赖（仅缺失时）
       ansible.builtin.apt:
         name: "{{ ipq_pkgs }}"
         state: present
@@ -102,47 +95,59 @@
         executable: /bin/bash
       register: ipq_run
       async: 1200
-      poll: 20
+      poll: 15
       changed_when: false
       failed_when: false
+      when: not (ipq_reuse | default(0) | bool)
 
-    - name: 解析为紧凑行
-      ansible.builtin.shell: "python3 {{ ipq_parser }} {{ ipq_raw }} '{{ ansible_host | default(inventory_hostname) }}'"
+    - name: 解析为可读分行文本
+      ansible.builtin.shell: >-
+        python3 {{ ipq_parser }}
+        {{ (ipq_dir ~ '/latest.json') if (ipq_reuse | default(0) | bool) else ipq_raw }}
+        '{{ ansible_host | default(inventory_hostname) }}'
       register: ipq_lines
       changed_when: false
       failed_when: false
 
-    - name: 记录
+    - name: 采集结果
       ansible.builtin.debug:
-        msg: "{{ ipq_run.stdout | default('(no stdout)') }} -> {{ ipq_lines.stdout_lines | default([]) | join(' ;; ') }}"
+        msg: "{{ ipq_run.stdout | default('(no stdout)') }}"
 
 - name: Aggregate and notify Telegram
   hosts: localhost
   gather_facts: false
   vars:
-    chunk_size: "{{ ipq_chunk | default(16) | int }}"
+    chunk_nodes: "{{ ipq_chunk | default(8) | int }}"
     tg_enabled: "{{ ipq_notify | default(1) | int }}"
     tg_token: "{{ telegram_bot_token | default('') }}"
     tg_chat: "{{ telegram_chat_id | default('') }}"
   tasks:
-    - name: 汇总所有行
+    - name: 汇总每台节点的文本块
       ansible.builtin.set_fact:
-        ipq_all: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | flatten | list }}"
+        ipq_blocks: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list }}"
 
-    - name: 统计异常
+    - name: 展平并统计
       ansible.builtin.set_fact:
-        ipq_total: "{{ ipq_all | length }}"
-        ipq_bad_media: "{{ ipq_all | select('search', '[✘✖?]') | list }}"
-        ipq_bad_type: "{{ ipq_all | reject('search', '\\\\原生IP') | list }}"
+        ipq_flat: "{{ ipq_blocks | flatten | list }}"
+        ipq_hosts: "{{ ipq_blocks | length }}"
 
-    - name: 组装分片
+    - name: 按族归类
       ansible.builtin.set_fact:
-        ipq_header: "【IP 质量巡检】{{ lookup('pipe', 'date \"+%Y-%m-%d %H:%M\"') }} | 共 {{ ipq_total }} 条（每台 v4+v6）"
-        ipq_chunks: "{{ (ipq_all | batch(chunk_size)) | list }}"
+        ipq_ip_lines: "{{ ipq_flat | select('match', '^v[46] · ') | list }}"
+        ipq_v4_lines: "{{ ipq_flat | select('match', '^v4 · ') | list }}"
+        ipq_v6_lines: "{{ ipq_flat | select('match', '^v6 · ') | list }}"
+
+    - name: 汇总头
+      ansible.builtin.set_fact:
+        ipq_header: "{{ lookup('template', 'ipq-header.j2') }}"
+
+    - name: 组装分片（每片 8 台节点）
+      ansible.builtin.set_fact:
+        ipq_chunks: "{{ (ipq_blocks | batch(chunk_nodes)) | list }}"
 
     - name: 控制台输出
       ansible.builtin.debug:
-        msg: "{{ [ipq_header] + ipq_all }}"
+        msg: "{{ [ipq_header] + ipq_flat }}"
 
     - name: 推送 Telegram（分片）
       ansible.builtin.uri:
@@ -151,7 +156,7 @@
         body_format: json
         body:
           chat_id: "{{ tg_chat }}"
-          text: "{{ (ipq_header if idx == 0 else '') ~ (('\n' if idx == 0 else '')) ~ (item | join('\n')) }}"
+          text: "{{ (ipq_header ~ '\n\n' if idx == 0 else '') ~ (item | map('join', '\n') | join('\n\n')) }}"
           disable_web_page_preview: true
         status_code: 200
         timeout: 20
@@ -167,9 +172,35 @@
       ignore_errors: true
       register: ipq_tg
 
-    - name: 统计与推送结果
+    - name: 收集需关注项（v4 媒体异常 / 非原生IP / 采集失败）
+      ansible.builtin.set_fact:
+        ipq_alerts: "{{ (ipq_v4_lines | reject('search', '✅') | list) + (ipq_ip_lines | reject('search', '原生IP') | list) + (ipq_flat | select('search', '采集失败') | list) }}"
+
+    - name: 推送“需关注”清单
+      ansible.builtin.uri:
+        url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
+        method: POST
+        body_format: json
+        body:
+          chat_id: "{{ tg_chat }}"
+          text: "⚠️ 需关注（v4 媒体异常 / 非原生IP / 采集失败）\n\n{{ ipq_alerts | join('\n') }}"
+          disable_web_page_preview: true
+        status_code: 200
+        timeout: 20
+      when:
+        - tg_enabled | int == 1
+        - tg_token | length > 0
+        - tg_chat | length > 0
+        - ipq_alerts | length > 0
+      no_log: true
+      ignore_errors: true
+      register: ipq_tg_alert
+
+    - name: 推送结果
       ansible.builtin.debug:
         msg:
-          - "非原生IP 行数: {{ ipq_bad_type | length }}{% if ipq_bad_type %} -> {{ ipq_bad_type | join(' ;; ') }}{% endif %}"
-          - "媒体未全解锁 行数: {{ ipq_bad_media | length }}{% if ipq_bad_media %} -> {{ ipq_bad_media | join(' ;; ') }}{% endif %}"
-          - "Telegram 分片数: {{ ipq_chunks | length }} | 发送状态: {{ (ipq_tg.results | default([]) | selectattr('status', 'defined') | map(attribute='status') | list) if (ipq_tg is defined and ipq_tg.results is defined) else 'skipped' }}"
+          - "节点 {{ ipq_hosts }} 台 · IP 记录 {{ ipq_ip_lines | length }} 条"
+          - "非原生IP: {{ ipq_ip_lines | reject('search', '原生IP') | list | length }} 条"
+          - "媒体异常: v4 {{ ipq_v4_lines | reject('search', '✅') | list | length }} 条 / v6 {{ ipq_v6_lines | reject('search', '✅') | list | length }} 条"
+          - "需关注清单: {{ ipq_alerts | length }} 条"
+          - "Telegram 分片: {{ ipq_chunks | length }} 片 ｜ HTTP: {{ (ipq_tg.results | default([]) | selectattr('status', 'defined') | map(attribute='status') | list) if (ipq_tg is defined and ipq_tg.results is defined) else 'skipped' }}"
