@@ -1,19 +1,26 @@
 ---
 # ============================================================================
-# ipquality-report.yml —— xykt/IPQuality IP 质量巡检（可读版推送）
+# ipquality-report.yml —— xykt/IPQuality IP 质量巡检（只报异常版）
 #
-# 每台节点输出可读文本（由 files/ipq-parse.py 生成）：
-#     ▎us1.awso.cloud
-#     v4 · 23.147.120.204 · TAIPEI101 NETWORK LLC · 美国·North Kansas City · 原生IP · ✅ 全解锁（7/7）
-#     v6 · 2600:1700:2bc1:409d:8::f80d · AT&T Enterprises, LLC · …·Warrenville · 原生IP · ⚠️ TikTok✖ Prime✘
-# 消息按「每片 8 台节点」切分，首片带汇总统计。
+# 默认「仅异常」：正常节点完全不推送，只列出现异常/非原生的节点：
+#     ▎us34.awso.cloud
+#     v4 · 162.251.204.47 · Oneman Network Limited · 美国 · 原生IP · ⚠️ AmazonPrime✘ ｜ 其余6项解锁（全部原生）
+#
+# 判定为「异常」的条件（满足其一即列出该节点）：
+#     · 媒体出现 ✘（屏蔽）/ ✖（检测失败）
+#     · 解锁方式含 DNS（=DNS，非原生解锁）
+#     · IP 类型不是「原生IP」
+#     · 采集失败（无输出 / JSON 解析失败）
 #
 # 用法（eb: /opt/remnanode-ansible/ansible）：
-#   全并行（推荐，约 4 分钟）：
+#   全并行（约 4 分钟）：
 #     ansible-playbook -i inventory/production.yml playbooks/ipquality-report.yml -e ipq_serial=43 -f 43
-#   保守（默认 serial=6）：直接跑
-#   单台 / 不发 TG：  --limit node-18 -e ipq_notify=0
-#   只看 IPv4：       -e ipq_cli_flags='-4 -f -n -p -j'
+#   只跑几台（调试）：
+#     ... --limit node-01,node-16,node-34
+#   只重排版不重采集（约 1.5 分钟）：
+#     ... -e ipq_reuse=1
+#   输出全部节点（含正常）+ 逐项解锁方式：
+#     ... -e ipq_alerts_only=0 -e ipq_media_detail=1
 # ============================================================================
 - name: Collect IP quality per node (xykt/IPQuality)
   hosts: nodes
@@ -100,12 +107,13 @@
       failed_when: false
       when: not (ipq_reuse | default(0) | bool)
 
-    - name: 解析为可读分行文本
+    - name: 解析为可读分行文本（默认仅异常）
       ansible.builtin.shell: >-
         python3 {{ ipq_parser }}
         {{ (ipq_dir ~ '/latest.json') if (ipq_reuse | default(0) | bool) else ipq_raw }}
         '{{ ansible_host | default(inventory_hostname) }}'
         {{ 'detail' if (ipq_media_detail | default(0) | bool) else '' }}
+        {{ 'alerts-only' if (ipq_alerts_only | default(1) | bool) else '' }}
       register: ipq_lines
       changed_when: false
       failed_when: false
@@ -118,39 +126,34 @@
   hosts: localhost
   gather_facts: false
   vars:
-    chunk_nodes: "{{ ipq_chunk | default(8) | int }}"
+    chunk_nodes: "{{ ipq_chunk | default(10) | int }}"
     tg_enabled: "{{ ipq_notify | default(1) | int }}"
     tg_token: "{{ telegram_bot_token | default('') }}"
     tg_chat: "{{ telegram_chat_id | default('') }}"
+    alerts_only: "{{ ipq_alerts_only | default(1) | int }}"
   tasks:
-    - name: 汇总每台节点的文本块
+    - name: 汇总异常节点文本块（正常节点为空，自动排除）
       ansible.builtin.set_fact:
         ipq_blocks: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list }}"
 
-    - name: 展平并统计
+    - name: 统计扫描 / 异常台数
       ansible.builtin.set_fact:
-        ipq_flat: "{{ ipq_blocks | flatten | list }}"
-        ipq_hosts: "{{ ipq_blocks | length }}"
-
-    - name: 按族归类
-      ansible.builtin.set_fact:
-        ipq_ip_lines: "{{ ipq_flat | select('match', '^v[46] · ') | list }}"
-        ipq_v4_lines: "{{ ipq_flat | select('match', '^v4 · ') | list }}"
-        ipq_v6_lines: "{{ ipq_flat | select('match', '^v6 · ') | list }}"
+        ipq_scanned: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | list | length }}"
+        ipq_hosts: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list | length }}"
 
     - name: 汇总头
       ansible.builtin.set_fact:
         ipq_header: "{{ lookup('template', 'ipq-header.j2') }}"
 
-    - name: 组装分片（每片 8 台节点）
+    - name: 组装分片
       ansible.builtin.set_fact:
         ipq_chunks: "{{ (ipq_blocks | batch(chunk_nodes)) | list }}"
 
     - name: 控制台输出
       ansible.builtin.debug:
-        msg: "{{ [ipq_header] + ipq_flat }}"
+        msg: "{{ [ipq_header] + (ipq_blocks | flatten) }}"
 
-    - name: 推送 Telegram（分片）
+    - name: 异常清单推送 Telegram（分片）
       ansible.builtin.uri:
         url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
         method: POST
@@ -169,22 +172,19 @@
         - tg_enabled | int == 1
         - tg_token | length > 0
         - tg_chat | length > 0
+        - ipq_blocks | length > 0
       no_log: true
       ignore_errors: true
       register: ipq_tg
 
-    - name: 收集需关注项（v4 媒体异常 / 非原生IP / 采集失败）
-      ansible.builtin.set_fact:
-        ipq_alerts: "{{ (ipq_v4_lines | select('search', '[✘✖]') | list) + (ipq_ip_lines | reject('search', '原生IP') | list) + (ipq_flat | select('search', '采集失败') | list) }}"
-
-    - name: 推送“需关注”清单
+    - name: 全部正常时的一条通知
       ansible.builtin.uri:
         url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
         method: POST
         body_format: json
         body:
           chat_id: "{{ tg_chat }}"
-          text: "⚠️ 需关注（v4 媒体异常 / 非原生IP / 采集失败）\n\n{{ ipq_alerts | join('\n') }}"
+          text: "{{ ipq_header }}"
           disable_web_page_preview: true
         status_code: 200
         timeout: 20
@@ -192,16 +192,14 @@
         - tg_enabled | int == 1
         - tg_token | length > 0
         - tg_chat | length > 0
-        - ipq_alerts | length > 0
+        - ipq_blocks | length == 0
       no_log: true
       ignore_errors: true
-      register: ipq_tg_alert
+      register: ipq_tg_ok
 
     - name: 推送结果
       ansible.builtin.debug:
         msg:
-          - "节点 {{ ipq_hosts }} 台 · IP 记录 {{ ipq_ip_lines | length }} 条"
-          - "非原生IP: {{ ipq_ip_lines | reject('search', '原生IP') | list | length }} 条"
-          - "媒体异常: v4 {{ ipq_v4_lines | select('search', '[✘✖]') | list | length }} 条 / v6 {{ ipq_v6_lines | select('search', '[✘✖]') | list | length }} 条"
-          - "需关注清单: {{ ipq_alerts | length }} 条"
+          - "扫描 {{ ipq_scanned }} 台 · 异常 {{ ipq_hosts }} 台 · 正常 {{ (ipq_scanned | int) - (ipq_hosts | int) }} 台"
+          - "模式: {{ '仅异常' if alerts_only | int == 1 else '全部节点' }} ｜ 明细: {{ '逐项解锁方式' if (ipq_media_detail | default(0) | bool) else '紧凑' }}"
           - "Telegram 分片: {{ ipq_chunks | length }} 片 ｜ HTTP: {{ (ipq_tg.results | default([]) | selectattr('status', 'defined') | map(attribute='status') | list) if (ipq_tg is defined and ipq_tg.results is defined) else 'skipped' }}"

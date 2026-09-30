@@ -2,13 +2,15 @@
 """
 解析 xykt/IPQuality 的 JSON 输出，生成【人类可读】的分行文本（供 Telegram 推送）。
 
-    ▎us1.awso.cloud
-    v4 · 23.147.120.204 · TAIPEI101 NETWORK LLC · 美国·North Kansas City · 原生IP · ✅ 全解锁（7/7 · 全部原生）
-    v6 · 2600:1700:2bc1:409d:8::f80d · AT&T Enterprises, LLC · 美国·Warrenville · 原生IP · ⚠️ TikTok✖ AmazonPrime✘ ｜ 其余5项解锁
+用法：
+    ipq-parse.py <结果文件> <节点名> [detail] [alerts-only]
 
-解锁方式（JSON 的 Media.<服务>.Type）：
-    原生 / DNS（脚本里的 ViaDNS，表示仅 DNS 层面看着可解锁）/ 空（未解锁）
-默认只把"非原生"显式列出来；加第 3 个参数 detail 可逐项展开。
+    detail       : 媒体逐项展开（含解锁方式），默认只列异常项
+    alerts-only  : 只输出"异常/非原生"的行；该节点完全正常则不输出任何内容
+
+输出示例（alerts-only）：
+    ▎us34.awso.cloud
+    v4 · 162.251.204.47 · Oneman Network Limited · 美国 · 原生IP · ⚠️ AmazonPrime✘ ｜ 其余6项解锁（全部原生）
 """
 import json
 import sys
@@ -81,10 +83,9 @@ def media_text(media, detail=False):
     rows = []
     for key, label in SERVICES:
         item = media.get(key) or {}
-        status = str(item.get("Status") or "?").strip()
-        region = str(item.get("Region") or "").strip()
-        kind = str(item.get("Type") or "").strip()
-        rows.append((label, status, region, kind))
+        rows.append((label, str(item.get("Status") or "?").strip(),
+                     str(item.get("Region") or "").strip(),
+                     str(item.get("Type") or "").strip()))
 
     if detail:
         out = []
@@ -108,10 +109,30 @@ def media_text(media, detail=False):
     return "⚠️ " + " ".join(bad) + tail
 
 
+def build_lines(obj, detail):
+    head = obj.get("Head") or {}
+    info = obj.get("Info") or {}
+    ip = clean(head.get("IP"))
+    family = "v6" if ":" in ip else "v4"
+    org = clean(info.get("Organization"))
+    region = region_text(info)
+    city = clean((info.get("City") or {}).get("Name"))
+    kind = clean(info.get("Type"))
+    place = f"{region}·{city}" if city != "-" else region
+    media = media_text(obj.get("Media"), detail)
+    line = f"{family} · {ip} · {org} · {place} · {kind} · {media}"
+    abnormal = ("✘" in media or "✖" in media or "=DNS" in media
+                or kind != "原生IP" or "采集失败" in line)
+    return line, abnormal
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ipq-raw.json"
     host = sys.argv[2] if len(sys.argv) > 2 else "unknown"
-    detail = len(sys.argv) > 3 and str(sys.argv[3]).strip().lower() in ("detail", "1", "true")
+    flags = {str(a).strip().lower() for a in sys.argv[3:]}
+    detail = bool({"detail", "1", "true"} & flags)
+    alerts_only = bool({"alerts-only", "alerts", "only-alerts"} & flags)
+
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
@@ -119,22 +140,31 @@ def main():
         print(f"▎{host}")
         print(f"⚠️ 采集失败：无法读取结果文件（{exc}）")
         return 1
+
     objs = load_objects(raw)
-    print(f"▎{host}")
     if not objs:
+        print(f"▎{host}")
         print("⚠️ 采集失败：未取到有效 JSON（可查看 /var/lib/ipquality/latest.err）")
         return 1
+
+    lines, bad_lines = [], []
     for obj in objs:
-        head = obj.get("Head") or {}
-        info = obj.get("Info") or {}
-        ip = clean(head.get("IP"))
-        family = "v6" if ":" in ip else "v4"
-        org = clean(info.get("Organization"))
-        region = region_text(info)
-        city = clean((info.get("City") or {}).get("Name"))
-        kind = clean(info.get("Type"))
-        place = f"{region}·{city}" if city != "-" else region
-        print(f"{family} · {ip} · {org} · {place} · {kind} · {media_text(obj.get('Media'), detail)}")
+        line, abnormal = build_lines(obj, detail)
+        lines.append(line)
+        if abnormal:
+            bad_lines.append(line)
+
+    if alerts_only:
+        if not bad_lines:
+            return 0
+        print(f"▎{host}")
+        for line in bad_lines:
+            print(line)
+        return 0
+
+    print(f"▎{host}")
+    for line in lines:
+        print(line)
     return 0
 
 

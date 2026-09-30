@@ -1,3 +1,4 @@
 🧪 IP 质量巡检 · {{ lookup('pipe', 'date "+%Y-%m-%d %H:%M"') }}
-节点 {{ ipq_hosts }} 台 · IP 记录 {{ ipq_ip_lines | length }} 条
-原生IP {{ ipq_ip_lines | select('search', '原生IP') | list | length }}/{{ ipq_ip_lines | length }} ｜ v4 全解锁 {{ (ipq_v4_lines | length) - (ipq_v4_lines | select('search', '[✘✖]') | list | length) }}/{{ ipq_v4_lines | length }} ｜ v6 有异常 {{ ipq_v6_lines | select('search', '[✘✖]') | list | length }}/{{ ipq_v6_lines | length }}
+扫描 {{ ipq_scanned }} 台 · 异常 {{ ipq_hosts }} 台 · 正常 {{ (ipq_scanned | int) - (ipq_hosts | int) }} 台
+{% if (ipq_hosts | int) == 0 %}✅ 全部正常
+{%- else %}以下仅列异常项：✘媒体屏蔽 / ✖检测失败 / =DNS 非原生解锁 / 非原生IP{% endif %}
