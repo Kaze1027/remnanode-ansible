@@ -1,0 +1,1 @@
+🧪 DynamicV6 Next 巡检 · {{ lookup('pipe', 'date "+%Y-%m-%d %H:%M"') }}{{ '\n' }}节点 {{ dvn_scanned }} 台 · {% if (dvn_blocks | length) == 0 %}✅ 全部正常{% else %}⚠️ 异常 {{ dvn_blocks | length }} 台{% endif %}{{ '\n' }}检查项：服务状态 · 出口可达 · 默认路由(leased) · metric99 · 配额 ≥{{ quota_warn_pct }}% · sync失败 >3

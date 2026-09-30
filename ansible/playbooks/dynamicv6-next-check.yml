@@ -1,17 +1,19 @@
 ---
 # ============================================================================
-# dynamicv6-next-check.yml
-#   一键巡检：新客户端（DynamicV6 Next）状态 + 出口健康 + 配额用量 + 日志异常
-#   结果汇总后发送到 Telegram（bot）
+# dynamicv6-next-check.yml —— DynamicV6 Next 客户端巡检（只报异常版）
+#
+# 汇总后推送 Telegram：
+#   · 全部正常 → 一行结论（不列 43 台）
+#   · 有异常   → 逐台列出【异常节点】：节点名(域名) + 具体异常项 + 当前出口 IP
+#
+# 检查项：服务状态(active) · 出口可达 · 默认路由(leased) · metric99 动态默认
+#         · 配额 ≥ 阈值 · 15 分钟内 sync 失败次数
 #
 # 用法（eb: /opt/remnanode-ansible/ansible）：
 #   ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-check.yml
-#   ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-check.yml -e dvn_check_verbose=1
-#   ansible-playbook -i inventory/production.yml playbooks/dynamicv6-next-check.yml -e dvn_check_fail_hard=1
-#
-# Telegram 配置（二选一）：
-#   1) playbooks/group_vars/all.yml 里的 telegram_bot_token / telegram_chat_id
-#   2) 命令行 -e telegram_bot_token=xxx -e telegram_chat_id=yyy
+#   ... -e dvn_check_verbose=1        # 附全部 43 台明细
+#   ... -e dvn_check_fail_hard=1      # 有异常时返回非零
+#   ... --limit node-01,node-27       # 只查几台（调试）
 # ============================================================================
 - name: Collect DynamicV6 Next client status per node
   hosts: nodes
@@ -19,11 +21,13 @@
   gather_facts: false
   vars:
     dvn_probe_urls: "https://one.one.one.one/cdn-cgi/trace https://api6.ipify.org https://v6.ipinfo.io/ip"
+    quota_warn: "{{ dvn_quota_warn_pct | default(85) | int }}"
   tasks:
     - name: Skip non-Aether hosts (dvn_managed=false)
       ansible.builtin.meta: end_host
       when: not (dvn_managed | default(true) | bool)
-    - name: "Gather status (JSON)"
+
+    - name: Gather status (JSON + 异常块)
       ansible.builtin.shell: |
         H=$(hostname)
         SVC=$(systemctl is-active dynamicv6-next-guest.service 2>/dev/null || echo inactive)
@@ -41,11 +45,30 @@
           curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 "$u" >/dev/null 2>&1 && { HEALTH=OK; break; }
         done
         SF=$(journalctl -u dynamicv6-next-guest.service --since '15 min ago' --no-pager 2>/dev/null | grep -c 'sync failed' || true)
-        jq -cn --arg h "$H" --arg svc "$SVC" --arg pref "$PREF" --arg out "$OUT" --arg health "$HEALTH" \
+
+        BAD=()
+        [ "$SVC" != "active" ] && BAD+=("服务=$SVC")
+        [ "$HEALTH" != "OK" ] && BAD+=("出口不可达")
+        [ "$PREF" != "leased" ] && BAD+=("默认=$PREF")
+        [ "${M99:-0}" -lt 1 ] && BAD+=("缺 metric99")
+        if [ "${LIMIT:-0}" -gt 0 ] && [ "${PCT:-0}" -ge {{ quota_warn }} ]; then BAD+=("配额 ${PCT}%"); fi
+        [ "${SF:-0}" -gt 3 ] && BAD+=("sync失败 ${SF}")
+        BADS=""
+        for b in "${BAD[@]}"; do [ -n "$b" ] && BADS="${BADS}${BADS:+ ｜ }$b"; done
+        BLK=""
+        if [ -n "$BADS" ]; then
+          NL=$'\n'
+          BLK="▎{{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})${NL}${BADS} ｜ 出口 ${OUT}"
+        fi
+
+        jq -cn --arg h "$H" --arg inv "{{ inventory_hostname }}" --arg ah "{{ ansible_host | default(inventory_hostname) }}" \
+               --arg svc "$SVC" --arg pref "$PREF" --arg out "$OUT" --arg health "$HEALTH" --arg blk "$BLK" \
                --argjson used "${USED:-0}" --argjson limit "${LIMIT:-0}" --argjson remain "${REMAIN:-0}" \
                --argjson pct "${PCT:-0}" --argjson m99 "${M99:-0}" --argjson sf "${SF:-0}" \
                --arg line "$H $SVC/$PREF/$OUT ${PCT}%/sf=${SF}" \
-               '{host:$h,svc:$svc,pref:$pref,out:$out,health:$health,used:$used,limit:$limit,remain:$remain,pct:$pct,m99:$m99,sf:$sf,line:$line}'
+               '{host:$h,inv:$inv,ah:$ah,svc:$svc,pref:$pref,out:$out,health:$health,used:$used,limit:$limit,remain:$remain,pct:$pct,m99:$m99,sf:$sf,line:$line,blk:$blk}'
+      args:
+        executable: /bin/bash
       register: dvn_chk
       changed_when: false
 
@@ -58,6 +81,7 @@
     fail_hard: "{{ dvn_check_fail_hard | default(0) | int }}"
     tg_token: "{{ telegram_bot_token | default('') }}"
     tg_chat: "{{ telegram_chat_id | default('') }}"
+    chunk_nodes: "{{ dvn_alert_chunk | default(12) | int }}"
   tasks:
     - name: Build dataset
       ansible.builtin.set_fact:
@@ -65,58 +89,80 @@
 
     - name: Compute problem lists
       ansible.builtin.set_fact:
-        dvn_bad_health: "{{ dvn_data | rejectattr('health', 'eq', 'OK') | map(attribute='host') | list }}"
-        dvn_bad_svc: "{{ dvn_data | rejectattr('svc', 'eq', 'active') | map(attribute='host') | list }}"
-        dvn_bad_pref: "{{ dvn_data | rejectattr('pref', 'eq', 'leased') | map(attribute='host') | list }}"
-        dvn_bad_m99: "{{ dvn_data | selectattr('m99', 'lt', 1) | map(attribute='host') | list }}"
-        dvn_bad_quota: "{{ dvn_data | selectattr('pct', 'ge', quota_warn_pct | int) | map(attribute='host') | list }}"
-        dvn_noisy: "{{ dvn_data | selectattr('sf', 'gt', 3) | map(attribute='host') | list }}"
+        dvn_bad_svc: "{{ dvn_data | rejectattr('svc', 'eq', 'active') | map(attribute='inv') | list }}"
+        dvn_bad_health: "{{ dvn_data | rejectattr('health', 'eq', 'OK') | map(attribute='inv') | list }}"
+        dvn_bad_pref: "{{ dvn_data | rejectattr('pref', 'eq', 'leased') | map(attribute='inv') | list }}"
+        dvn_bad_m99: "{{ dvn_data | selectattr('m99', 'lt', 1) | map(attribute='inv') | list }}"
+        dvn_bad_quota: "{{ dvn_data | selectattr('pct', 'ge', quota_warn_pct | int) | map(attribute='inv') | list }}"
+        dvn_noisy: "{{ dvn_data | selectattr('sf', 'gt', 3) | map(attribute='inv') | list }}"
 
-    - name: Compose report text
+    - name: 汇总异常节点文本块（正常节点为空）
       ansible.builtin.set_fact:
-        dvn_report: "{{ [
-          '【DynamicV6 Next 巡检】' ~ (lookup('pipe', 'date \"+%Y-%m-%d %H:%M:%S\"')),
-          '节点总数: ' ~ (dvn_data | length),
-          '服务异常(非active): ' ~ (dvn_bad_svc | length) ~ ((' -> ' ~ (dvn_bad_svc | join(', '))) if dvn_bad_svc | length > 0 else ''),
-          '出口异常: ' ~ (dvn_bad_health | length) ~ ((' -> ' ~ (dvn_bad_health | join(', '))) if dvn_bad_health | length > 0 else ''),
-          '默认非leased: ' ~ (dvn_bad_pref | length) ~ ((' -> ' ~ (dvn_bad_pref | join(', '))) if dvn_bad_pref | length > 0 else ''),
-          '缺 metric99 动态默认: ' ~ (dvn_bad_m99 | length) ~ ((' -> ' ~ (dvn_bad_m99 | join(', '))) if dvn_bad_m99 | length > 0 else ''),
-          '配额>= ' ~ quota_warn_pct ~ '%: ' ~ (dvn_bad_quota | length) ~ ((' -> ' ~ (dvn_bad_quota | join(', '))) if dvn_bad_quota | length > 0 else ''),
-          'sync失败>3次(15min): ' ~ (dvn_noisy | length) ~ ((' -> ' ~ (dvn_noisy | join(', '))) if dvn_noisy | length > 0 else ''),
-          '状态: ' ~ (('[异常] 需要处理') if (dvn_bad_svc | length > 0 or dvn_bad_health | length > 0 or dvn_bad_pref | length > 0 or dvn_bad_m99 | length > 0) else '[正常] 全部通过'),
-          (('\n明细(host 服务/偏好/出口IP/用量%/sync):\n' ~ (dvn_data | sort(attribute='host') | map(attribute='line') | join('\n'))) if verbose == 1 else '')
-        ] | join('\n') }}"
+        dvn_blocks: "{{ dvn_data | map(attribute='blk') | select('truthy') | list }}"
+        dvn_scanned: "{{ dvn_data | length }}"
+
+    - name: 汇总头
+      ansible.builtin.set_fact:
+        dvn_header: "{{ lookup('template', 'dvn-header.j2') }}"
+
+    - name: 组装分片
+      ansible.builtin.set_fact:
+        dvn_chunks: "{{ (dvn_blocks | batch(chunk_nodes)) | list }}"
 
     - name: Print report
       ansible.builtin.debug:
-        msg: "{{ dvn_report.split('\n') }}"
+        msg: "{{ [dvn_header] + dvn_blocks + ([('明细:\n' ~ (dvn_data | sort(attribute='inv') | map(attribute='line') | join('\n')))] if verbose | int == 1 else []) }}"
 
-    - name: Send to Telegram
+    - name: Send alert blocks to Telegram
       ansible.builtin.uri:
         url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
         method: POST
         body_format: json
         body:
           chat_id: "{{ tg_chat }}"
-          text: "{{ dvn_report }}"
+          text: "{{ (dvn_header ~ '\n\n' if idx == 0 else '') ~ (item | join('\n\n')) }}"
+          disable_web_page_preview: true
+        status_code: 200
+        timeout: 20
+      loop: "{{ dvn_chunks }}"
+      loop_control:
+        index_var: idx
+        pause: 1
+      when:
+        - tg_token | length > 0
+        - tg_chat | length > 0
+        - dvn_blocks | length > 0
+      no_log: true
+      ignore_errors: true
+      register: dvn_tg
+
+    - name: Send all-clear to Telegram
+      ansible.builtin.uri:
+        url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
+        method: POST
+        body_format: json
+        body:
+          chat_id: "{{ tg_chat }}"
+          text: "{{ dvn_header }}{{ (('\n\n明细:\n' ~ (dvn_data | sort(attribute='inv') | map(attribute='line') | join('\n'))) if verbose | int == 1 else '') }}"
           disable_web_page_preview: true
         status_code: 200
         timeout: 20
       when:
         - tg_token | length > 0
         - tg_chat | length > 0
+        - dvn_blocks | length == 0
       no_log: true
       ignore_errors: true
-      register: dvn_tg
+      register: dvn_tg_ok
 
     - name: Telegram send result
       ansible.builtin.debug:
         msg: >-
           Telegram:
           {%- if tg_token | length == 0 or tg_chat | length == 0 %} skipped (token/chat_id 未配置)
-          {%- elif dvn_tg is defined and (dvn_tg.status | default(0)) == 200 %} sent OK
-          {%- else %} FAILED -> {{ dvn_tg.msg | default('unknown')
-            | regex_replace('https://api.telegram.org/bot[^ ]*', 'https://api.telegram.org/bot<TOKEN>') }}
+          {%- elif (dvn_blocks | length == 0) and (dvn_tg_ok is defined) and ((dvn_tg_ok.status | default(0)) == 200) %} sent OK (全部正常)
+          {%- elif (dvn_blocks | length > 0) and (dvn_tg is defined) and (dvn_tg.results is defined) %} sent OK ({{ dvn_chunks | length }} 片)
+          {%- else %} FAILED
           {%- endif %}
 
     - name: Fail when problems found (需 -e dvn_check_fail_hard=1)
