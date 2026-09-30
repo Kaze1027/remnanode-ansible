@@ -5,12 +5,14 @@
 用法：
     ipq-parse.py <结果文件> <节点名> [detail] [alerts-only]
 
-    detail       : 媒体逐项展开（含解锁方式），默认只列异常项
-    alerts-only  : 只输出"异常/非原生"的行；该节点完全正常则不输出任何内容
+    detail       : 解锁信息逐项展开（含解锁方式），仅作用于"全部输出"模式
+    alerts-only  : 仅当该节点存在异常时才输出；节点内每行的 IP/组织/地区/类型都保留，
+                   但解锁信息只保留【非原生 + 异常】项；完全正常的节点不输出
 
 输出示例（alerts-only）：
-    ▎us34.awso.cloud
-    v4 · 162.251.204.47 · Oneman Network Limited · 美国 · 原生IP · ⚠️ AmazonPrime✘ ｜ 其余6项解锁（全部原生）
+    ▎us1.awso.cloud
+    v4 · 23.147.120.204 · TAIPEI101 NETWORK LLC · 美国·North Kansas City · 原生IP
+    v6 · 2600:1700:2bc1:409d:8::f80d · AT&T Enterprises, LLC · 美国·Warrenville · 原生IP · ⚠️ TikTok✖ AmazonPrime✘
 """
 import json
 import sys
@@ -78,27 +80,29 @@ def region_text(info):
     return name
 
 
-def media_text(media, detail=False):
+def rows_of(media):
     media = media or {}
-    rows = []
+    out = []
     for key, label in SERVICES:
         item = media.get(key) or {}
-        rows.append((label, str(item.get("Status") or "?").strip(),
-                     str(item.get("Region") or "").strip(),
-                     str(item.get("Type") or "").strip()))
+        out.append((label, str(item.get("Status") or "?").strip(),
+                    str(item.get("Region") or "").strip(),
+                    str(item.get("Type") or "").strip()))
+    return out
 
+
+def media_full(rows, detail=False):
+    """全部输出模式：正常项也显示。"""
     if detail:
-        out = []
+        parts = []
         for label, status, region, kind in rows:
             sym = SYM.get(status, "?")
             extra = f"·{kind}" if kind and kind not in NATIVE else ("·原生" if status == "解锁" else "")
-            out.append(f"{label} {sym}{region}{extra}")
-        return " ｜ ".join(out)
-
+            parts.append(f"{label} {sym}{region}{extra}")
+        return " ｜ ".join(parts)
     unlocked = [r for r in rows if r[1] == "解锁"]
     bad = [f"{label}{SYM.get(status, '?')}" for label, status, _, _ in rows if status != "解锁"]
     nonnative = [label for label, status, _, kind in rows if status == "解锁" and kind and kind not in NATIVE]
-
     if not bad:
         head = f"✅ 全解锁（{len(unlocked)}/{len(rows)}"
         head += f" · 其中 {'、'.join(nonnative)}=DNS）" if nonnative else " · 全部原生）"
@@ -109,21 +113,20 @@ def media_text(media, detail=False):
     return "⚠️ " + " ".join(bad) + tail
 
 
-def build_lines(obj, detail):
-    head = obj.get("Head") or {}
-    info = obj.get("Info") or {}
-    ip = clean(head.get("IP"))
-    family = "v6" if ":" in ip else "v4"
-    org = clean(info.get("Organization"))
-    region = region_text(info)
-    city = clean((info.get("City") or {}).get("Name"))
-    kind = clean(info.get("Type"))
-    place = f"{region}·{city}" if city != "-" else region
-    media = media_text(obj.get("Media"), detail)
-    line = f"{family} · {ip} · {org} · {place} · {kind} · {media}"
-    abnormal = ("✘" in media or "✖" in media or "=DNS" in media
-                or kind != "原生IP" or "采集失败" in line)
-    return line, abnormal
+def media_alerts(rows):
+    """仅异常模式：只保留非原生 + 异常项；完全正常返回空串。"""
+    bad, dns = [], []
+    for label, status, region, kind in rows:
+        if status != "解锁":
+            bad.append(f"{label}{SYM.get(status, '?')}")
+        elif kind and kind not in NATIVE:
+            dns.append(f"{label}({kind})")
+    if not bad and not dns:
+        return ""
+    text = "⚠️ " + " ".join(bad) if bad else "⚠️"
+    if dns:
+        text += (" ｜ " if bad else " ") + "非原生解锁: " + " ".join(dns)
+    return text.strip()
 
 
 def main():
@@ -147,24 +150,39 @@ def main():
         print("⚠️ 采集失败：未取到有效 JSON（可查看 /var/lib/ipquality/latest.err）")
         return 1
 
-    lines, bad_lines = [], []
+    entries = []
     for obj in objs:
-        line, abnormal = build_lines(obj, detail)
-        lines.append(line)
-        if abnormal:
-            bad_lines.append(line)
+        head = obj.get("Head") or {}
+        info = obj.get("Info") or {}
+        ip = clean(head.get("IP"))
+        family = "v6" if ":" in ip else "v4"
+        org = clean(info.get("Organization"))
+        region = region_text(info)
+        city = clean((info.get("City") or {}).get("Name"))
+        kind = clean(info.get("Type"))
+        place = f"{region}·{city}" if city != "-" else region
+        base = f"{family} · {ip} · {org} · {place} · {kind}"
+        rows = rows_of(obj.get("Media"))
+        short = media_alerts(rows)
+        entries.append({
+            "base": base,
+            "full": media_full(rows, detail),
+            "short": short,
+            "abnormal": bool(short) or kind != "原生IP",
+        })
 
     if alerts_only:
-        if not bad_lines:
+        if not any(e["abnormal"] for e in entries):
             return 0
         print(f"▎{host}")
-        for line in bad_lines:
-            print(line)
+        for e in entries:
+            # 保留每行的 IP/组织/地区/类型；解锁信息只留非原生与异常
+            print(f"{e['base']} · {e['short']}" if e["short"] else e["base"])
         return 0
 
     print(f"▎{host}")
-    for line in lines:
-        print(line)
+    for e in entries:
+        print(f"{e['base']} · {e['full']}")
     return 0
 
 
