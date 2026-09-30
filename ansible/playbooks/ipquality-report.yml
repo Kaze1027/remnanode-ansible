@@ -105,6 +105,7 @@
         python3 {{ ipq_parser }}
         {{ (ipq_dir ~ '/latest.json') if (ipq_reuse | default(0) | bool) else ipq_raw }}
         '{{ ansible_host | default(inventory_hostname) }}'
+        {{ 'detail' if (ipq_media_detail | default(0) | bool) else '' }}
       register: ipq_lines
       changed_when: false
       failed_when: false
@@ -174,7 +175,7 @@
 
     - name: 收集需关注项（v4 媒体异常 / 非原生IP / 采集失败）
       ansible.builtin.set_fact:
-        ipq_alerts: "{{ (ipq_v4_lines | reject('search', '✅') | list) + (ipq_ip_lines | reject('search', '原生IP') | list) + (ipq_flat | select('search', '采集失败') | list) }}"
+        ipq_alerts: "{{ (ipq_v4_lines | select('search', '⚠️') | list) + (ipq_ip_lines | reject('search', '原生IP') | list) + (ipq_flat | select('search', '采集失败') | list) }}"
 
     - name: 推送“需关注”清单
       ansible.builtin.uri:
@@ -201,6 +202,6 @@
         msg:
           - "节点 {{ ipq_hosts }} 台 · IP 记录 {{ ipq_ip_lines | length }} 条"
           - "非原生IP: {{ ipq_ip_lines | reject('search', '原生IP') | list | length }} 条"
-          - "媒体异常: v4 {{ ipq_v4_lines | reject('search', '✅') | list | length }} 条 / v6 {{ ipq_v6_lines | reject('search', '✅') | list | length }} 条"
+          - "媒体异常: v4 {{ ipq_v4_lines | select('search', '⚠️') | list | length }} 条 / v6 {{ ipq_v6_lines | select('search', '⚠️') | list | length }} 条"
           - "需关注清单: {{ ipq_alerts | length }} 条"
           - "Telegram 分片: {{ ipq_chunks | length }} 片 ｜ HTTP: {{ (ipq_tg.results | default([]) | selectattr('status', 'defined') | map(attribute='status') | list) if (ipq_tg is defined and ipq_tg.results is defined) else 'skipped' }}"

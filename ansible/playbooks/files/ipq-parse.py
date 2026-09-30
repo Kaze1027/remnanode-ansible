@@ -2,13 +2,13 @@
 """
 解析 xykt/IPQuality 的 JSON 输出，生成【人类可读】的分行文本（供 Telegram 推送）。
 
-每台节点输出形如：
-
     ▎us1.awso.cloud
-    v4 · 23.147.120.204 · TAIPEI101 NETWORK LLC · 美国·North Kansas City · 原生IP · ✅ 全解锁（7/7）
-    v6 · 2600:1700:2bc1:409d:8::f80d · AT&T Enterprises, LLC · 美国·Warrenville · 原生IP · ⚠️ TikTok✖ Prime✘ ｜ 其余5项解锁
+    v4 · 23.147.120.204 · TAIPEI101 NETWORK LLC · 美国·North Kansas City · 原生IP · ✅ 全解锁（7/7 · 全部原生）
+    v6 · 2600:1700:2bc1:409d:8::f80d · AT&T Enterprises, LLC · 美国·Warrenville · 原生IP · ⚠️ TikTok✖ AmazonPrime✘ ｜ 其余5项解锁
 
-媒体只在有异常时列出异常项，避免一长串 ✔ 干扰阅读；地区优先用中文名。
+解锁方式（JSON 的 Media.<服务>.Type）：
+    原生 / DNS（脚本里的 ViaDNS，表示仅 DNS 层面看着可解锁）/ 空（未解锁）
+默认只把"非原生"显式列出来；加第 3 个参数 detail 可逐项展开。
 """
 import json
 import sys
@@ -18,12 +18,13 @@ SERVICES = [
     ("DisneyPlus", "Disney+"),
     ("Netflix", "Netflix"),
     ("Youtube", "YouTube"),
-    ("AmazonPrimeVideo", "Prime"),
+    ("AmazonPrimeVideo", "AmazonPrime"),
     ("Reddit", "Reddit"),
     ("ChatGPT", "ChatGPT"),
 ]
 SYM = {"解锁": "✔", "屏蔽": "✘", "失败": "✖"}
 PLACEHOLDER = {"", "null", "none", "n/a", "na"}
+NATIVE = {"原生", "native"}
 
 REGION_ZH = {
     "US": "美国", "CA": "加拿大", "MX": "墨西哥", "BR": "巴西", "AR": "阿根廷",
@@ -75,25 +76,42 @@ def region_text(info):
     return name
 
 
-def media_text(media):
+def media_text(media, detail=False):
     media = media or {}
-    bad, ok = [], 0
+    rows = []
     for key, label in SERVICES:
         item = media.get(key) or {}
         status = str(item.get("Status") or "?").strip()
-        if status == "解锁":
-            ok += 1
-        else:
-            bad.append(f"{label}{SYM.get(status, '?')}")
-    if ok == len(SERVICES):
-        return f"✅ 全解锁（{ok}/{len(SERVICES)}）"
-    suffix = f" ｜ 其余{ok}项解锁" if ok else ""
-    return "⚠️ " + " ".join(bad) + suffix
+        region = str(item.get("Region") or "").strip()
+        kind = str(item.get("Type") or "").strip()
+        rows.append((label, status, region, kind))
+
+    if detail:
+        out = []
+        for label, status, region, kind in rows:
+            sym = SYM.get(status, "?")
+            extra = f"·{kind}" if kind and kind not in NATIVE else ("·原生" if status == "解锁" else "")
+            out.append(f"{label} {sym}{region}{extra}")
+        return " ｜ ".join(out)
+
+    unlocked = [r for r in rows if r[1] == "解锁"]
+    bad = [f"{label}{SYM.get(status, '?')}" for label, status, _, _ in rows if status != "解锁"]
+    nonnative = [label for label, status, _, kind in rows if status == "解锁" and kind and kind not in NATIVE]
+
+    if not bad:
+        head = f"✅ 全解锁（{len(unlocked)}/{len(rows)}"
+        head += f" · 其中 {'、'.join(nonnative)}=DNS）" if nonnative else " · 全部原生）"
+        return head
+    tail = f" ｜ 其余{len(unlocked)}项解锁"
+    if unlocked:
+        tail += f"（其中 {'、'.join(nonnative)}=DNS）" if nonnative else "（全部原生）"
+    return "⚠️ " + " ".join(bad) + tail
 
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ipq-raw.json"
     host = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+    detail = len(sys.argv) > 3 and str(sys.argv[3]).strip().lower() in ("detail", "1", "true")
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
@@ -116,7 +134,7 @@ def main():
         city = clean((info.get("City") or {}).get("Name"))
         kind = clean(info.get("Type"))
         place = f"{region}·{city}" if city != "-" else region
-        print(f"{family} · {ip} · {org} · {place} · {kind} · {media_text(obj.get('Media'))}")
+        print(f"{family} · {ip} · {org} · {place} · {kind} · {media_text(obj.get('Media'), detail)}")
     return 0
 
 
