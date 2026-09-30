@@ -1,24 +1,26 @@
 ---
 # ============================================================================
 # ipquality-report.yml —— 用 xykt/IPQuality 采集每台节点的 IP 质量，
-#   按需求裁剪为紧凑单行并推送 Telegram：
+#   裁剪为紧凑单行并推送 Telegram：
 #       <host> [v4|v6] <IP> | <Organization>\<Region>-<City>\<Type> | <Media 摘要>
 #
-#   说明：
-#     - 脚本一次会输出 IPv4 + IPv6 两段 JSON（IPv6 是当前【出口】地址）
-#     - 单机耗时可达 1~3 分钟 → 异步执行 + serial 分批
-#     - 原始 JSON 留在节点 /var/lib/ipquality/latest.json 便于复查
+#   要点：
+#     - 脚本一次输出 IPv4 + IPv6 两段 JSON（IPv6 = 当前【出口】地址）
+#     - 单机 1~3 分钟 → 异步执行；并行度用 serial / -f 控制
+#     - 全并行（约 3~6 分钟跑完 43 台）：
+#         ansible-playbook -i inventory/production.yml playbooks/ipquality-report.yml \
+#           -e ipq_serial=43 -e ipq_jitter=20 -f 43
+#     - 稳妥默认（缓解第三方 API 限流）：serial=6
 #
-# 用法（eb: /opt/remnanode-ansible/ansible）：
+# 用法：
 #   全量:  ansible-playbook -i inventory/production.yml playbooks/ipquality-report.yml
-#   单台:  ansible-playbook -i inventory/production.yml playbooks/ipquality-report.yml --limit node-18
-#   不发TG: 加 -e ipq_notify=0
+#   单台:  ... --limit node-18 -e ipq_notify=0
 # ============================================================================
 - name: Collect IP quality per node (xykt/IPQuality)
   hosts: nodes
   become: true
   gather_facts: false
-  serial: 5
+  serial: "{{ ipq_serial | default(6) | int }}"
   vars:
     ipq_url: "https://IP.Check.Place"
     ipq_raw: /tmp/ipq-raw.json
@@ -41,6 +43,13 @@
         state: directory
         mode: "0755"
 
+    - name: 错峰启动（可选，缓解第三方 API 限流）
+      ansible.builtin.shell: sleep $(( RANDOM % {{ ipq_jitter | default(0) | int }} ))
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: (ipq_jitter | default(0) | int) > 0
+
     - name: 预装依赖（避免脚本自行 apt 安装导致超时）
       ansible.builtin.apt:
         name:
@@ -57,7 +66,7 @@
 
     - name: 下载 IPQuality 脚本（缓存复用；dash 下不能用 <(...) 进程替换）
       ansible.builtin.shell: |
-        curl -Ls --max-time 60 {{ ipq_url }} -o /usr/local/bin/ipq.sh
+        curl -Ls --max-time 60 "{{ ipq_url }}" -o /usr/local/bin/ipq.sh
         chmod 755 /usr/local/bin/ipq.sh
         echo "script_bytes=$(wc -c < /usr/local/bin/ipq.sh)"
       args:
@@ -106,7 +115,7 @@
       ansible.builtin.set_fact:
         ipq_all: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | flatten | list }}"
 
-    - name: 统计
+    - name: 统计异常
       ansible.builtin.set_fact:
         ipq_total: "{{ ipq_all | length }}"
         ipq_bad_media: "{{ ipq_all | select('search', '[✘✖?]') | list }}"
@@ -149,4 +158,4 @@
         msg:
           - "非原生IP 行数: {{ ipq_bad_type | length }}{% if ipq_bad_type %} -> {{ ipq_bad_type | join(' ;; ') }}{% endif %}"
           - "媒体未全解锁 行数: {{ ipq_bad_media | length }}{% if ipq_bad_media %} -> {{ ipq_bad_media | join(' ;; ') }}{% endif %}"
-          - "Telegram: {{ 'sent' if tg_enabled | int == 1 and tg_token | length > 0 and tg_chat | length > 0 else 'skipped' }}"
+          - "Telegram: {{ 'sent' if (tg_enabled | int == 1 and tg_token | length > 0 and tg_chat | length > 0) else 'skipped' }}"
