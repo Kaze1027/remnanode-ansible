@@ -1,24 +1,26 @@
 ---
 # ============================================================================
-# wiki-block-check.yml —— 舰队级维基封禁巡检（只报被封禁的节点）
+# wiki-edit-check.yml —— 舰队级「维基百科可编辑性」巡检（只报不能编辑的出口）
 #
-#   工具：playbooks/files/wiki-block-check.sh（基于维基官方 API：blockinfo + globalblocks）
-#   推送：全部未被封禁 → 一行结论；有封禁 → 逐台列出【被封禁的出口】
+#   逻辑借鉴 https://github.com/HsukqiLee/MediaUnlockTest (pkg/providers/Wikipedia.go)：
+#     GET https://zh.wikipedia.org/w/index.php?title=Wikipedia:沙盒&action=edit（匿名 + 浏览器 UA/头）
+#     判定：Banned 标记 / HTTP 429 / 200 但无编辑表单 → 不可编辑；200 且有编辑表单 → 可编辑
+#     不可编辑时再查维基 API（blockinfo/globalblocks）给出原因与期限
 #
 # 用法（eb: /opt/remnanode-ansible/ansible）：
-#   ansible-playbook -i inventory/production.yml playbooks/wiki-block-check.yml
-#   ... --limit node-03,node-34          # 只查几台
-#   ... -e wiki_native=1                 # 改测【原生 IPv6】出口（默认测当前出口：v4+v6）
-#   ... -e wiki_notify=0                 # 不推 TG
-#   ... -e 'wiki_hosts=zh.wikipedia.org ja.wikipedia.org en.wikipedia.org'
+#   ansible-playbook -i inventory/production.yml playbooks/wiki-edit-check.yml
+#   ... --limit node-03,node-34            # 只查几台
+#   ... -e wiki_native=1                   # 改测【原生 IPv6】出口（默认测当前出口）
+#   ... -e wiki_notify=0                   # 不推 TG
+#   ... -e 'wiki_targets=zh.wikipedia.org|Wikipedia:沙盒 en.wikipedia.org|Wikipedia:Sandbox'
 # ============================================================================
-- name: Check Wikipedia block status per node
+- name: Check Wikipedia editability per node
   hosts: nodes
   become: true
   gather_facts: false
   serial: "{{ wiki_serial | default(20) | int }}"
   vars:
-    wiki_hosts_list: "{{ wiki_hosts | default('zh.wikipedia.org en.wikipedia.org') }}"
+    wiki_targets_list: "{{ wiki_targets | default('zh.wikipedia.org|Wikipedia:沙盒') }}"
     wiki_tag: "{{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})"
   tasks:
     - name: 跳过非 Aether 主机
@@ -27,14 +29,14 @@
 
     - name: 部署检测脚本
       ansible.builtin.copy:
-        src: files/wiki-block-check.sh
-        dest: /usr/local/bin/wiki-block-check.sh
+        src: files/wiki-edit-check.sh
+        dest: /usr/local/bin/wiki-edit-check.sh
         mode: "0755"
 
-    - name: 执行检测（只输出被封禁项；无封禁则无输出）
+    - name: 执行检测（只输出"不可编辑"项；可编辑则无输出）
       ansible.builtin.shell: >-
-        /usr/local/bin/wiki-block-check.sh --block --tag "{{ wiki_tag }}"
-        -H "{{ wiki_hosts_list }}"
+        /usr/local/bin/wiki-edit-check.sh --block --tag "{{ wiki_tag }}"
+        -H "{{ wiki_targets_list }}"
         {{ '--native' if (wiki_native | default(0) | bool) else '' }}
       register: wiki_out
       changed_when: false
@@ -49,7 +51,7 @@
     tg_chat: "{{ telegram_chat_id | default('') }}"
     chunk_nodes: "{{ wiki_chunk | default(12) | int }}"
   tasks:
-    - name: 汇总被封禁节点文本块
+    - name: 汇总不可编辑节点文本块
       ansible.builtin.set_fact:
         wiki_blocks: "{{ groups['nodes'] | map('extract', hostvars, 'wiki_out') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list }}"
         wiki_scanned: "{{ groups['nodes'] | map('extract', hostvars, 'wiki_out') | select('defined') | list | length }}"
@@ -66,7 +68,7 @@
       ansible.builtin.debug:
         msg: "{{ [wiki_header] + (wiki_blocks | flatten) }}"
 
-    - name: 推送被封禁清单
+    - name: 推送不可编辑清单
       ansible.builtin.uri:
         url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
         method: POST
@@ -90,7 +92,7 @@
       ignore_errors: true
       register: wiki_tg
 
-    - name: 全部正常时的一条通知
+    - name: 全部可编辑时的一条通知
       ansible.builtin.uri:
         url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
         method: POST
@@ -113,5 +115,5 @@
     - name: 推送结果
       ansible.builtin.debug:
         msg:
-          - "扫描 {{ wiki_scanned }} 台 · 被封禁出口 {{ wiki_blocks | length }} 台"
+          - "扫描 {{ wiki_scanned }} 台 · 不可编辑出口 {{ wiki_blocks | length }} 台"
           - "Telegram 分片: {{ wiki_chunks | length }} 片"
