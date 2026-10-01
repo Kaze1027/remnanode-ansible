@@ -1,0 +1,117 @@
+---
+# ============================================================================
+# wiki-block-check.yml —— 舰队级维基封禁巡检（只报被封禁的节点）
+#
+#   工具：playbooks/files/wiki-block-check.sh（基于维基官方 API：blockinfo + globalblocks）
+#   推送：全部未被封禁 → 一行结论；有封禁 → 逐台列出【被封禁的出口】
+#
+# 用法（eb: /opt/remnanode-ansible/ansible）：
+#   ansible-playbook -i inventory/production.yml playbooks/wiki-block-check.yml
+#   ... --limit node-03,node-34          # 只查几台
+#   ... -e wiki_native=1                 # 改测【原生 IPv6】出口（默认测当前出口：v4+v6）
+#   ... -e wiki_notify=0                 # 不推 TG
+#   ... -e 'wiki_hosts=zh.wikipedia.org ja.wikipedia.org en.wikipedia.org'
+# ============================================================================
+- name: Check Wikipedia block status per node
+  hosts: nodes
+  become: true
+  gather_facts: false
+  serial: "{{ wiki_serial | default(20) | int }}"
+  vars:
+    wiki_hosts_list: "{{ wiki_hosts | default('zh.wikipedia.org en.wikipedia.org') }}"
+    wiki_tag: "{{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})"
+  tasks:
+    - name: 跳过非 Aether 主机
+      ansible.builtin.meta: end_host
+      when: not (dvn_managed | default(true) | bool)
+
+    - name: 部署检测脚本
+      ansible.builtin.copy:
+        src: files/wiki-block-check.sh
+        dest: /usr/local/bin/wiki-block-check.sh
+        mode: "0755"
+
+    - name: 执行检测（只输出被封禁项；无封禁则无输出）
+      ansible.builtin.shell: >-
+        /usr/local/bin/wiki-block-check.sh --block --tag "{{ wiki_tag }}"
+        -H "{{ wiki_hosts_list }}"
+        {{ '--native' if (wiki_native | default(0) | bool) else '' }}
+      register: wiki_out
+      changed_when: false
+      failed_when: false
+
+- name: Aggregate and notify Telegram
+  hosts: localhost
+  gather_facts: false
+  vars:
+    tg_enabled: "{{ wiki_notify | default(1) | int }}"
+    tg_token: "{{ telegram_bot_token | default('') }}"
+    tg_chat: "{{ telegram_chat_id | default('') }}"
+    chunk_nodes: "{{ wiki_chunk | default(12) | int }}"
+  tasks:
+    - name: 汇总被封禁节点文本块
+      ansible.builtin.set_fact:
+        wiki_blocks: "{{ groups['nodes'] | map('extract', hostvars, 'wiki_out') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list }}"
+        wiki_scanned: "{{ groups['nodes'] | map('extract', hostvars, 'wiki_out') | select('defined') | list | length }}"
+
+    - name: 汇总头
+      ansible.builtin.set_fact:
+        wiki_header: "{{ lookup('template', 'wiki-header.j2') }}"
+
+    - name: 组装分片
+      ansible.builtin.set_fact:
+        wiki_chunks: "{{ (wiki_blocks | batch(chunk_nodes)) | list }}"
+
+    - name: Print report
+      ansible.builtin.debug:
+        msg: "{{ [wiki_header] + (wiki_blocks | flatten) }}"
+
+    - name: 推送被封禁清单
+      ansible.builtin.uri:
+        url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
+        method: POST
+        body_format: json
+        body:
+          chat_id: "{{ tg_chat }}"
+          text: "{{ (wiki_header ~ '\n\n' if idx == 0 else '') ~ (item | join('\n\n')) }}"
+          disable_web_page_preview: true
+        status_code: 200
+        timeout: 20
+      loop: "{{ wiki_chunks }}"
+      loop_control:
+        index_var: idx
+        pause: 1
+      when:
+        - tg_enabled | int == 1
+        - tg_token | length > 0
+        - tg_chat | length > 0
+        - wiki_blocks | length > 0
+      no_log: true
+      ignore_errors: true
+      register: wiki_tg
+
+    - name: 全部正常时的一条通知
+      ansible.builtin.uri:
+        url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
+        method: POST
+        body_format: json
+        body:
+          chat_id: "{{ tg_chat }}"
+          text: "{{ wiki_header }}"
+          disable_web_page_preview: true
+        status_code: 200
+        timeout: 20
+      when:
+        - tg_enabled | int == 1
+        - tg_token | length > 0
+        - tg_chat | length > 0
+        - wiki_blocks | length == 0
+      no_log: true
+      ignore_errors: true
+      register: wiki_tg_ok
+
+    - name: 推送结果
+      ansible.builtin.debug:
+        msg:
+          - "扫描 {{ wiki_scanned }} 台 · 被封禁出口 {{ wiki_blocks | length }} 台"
+          - "Telegram 分片: {{ wiki_chunks | length }} 片"

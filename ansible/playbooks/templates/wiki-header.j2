@@ -1,0 +1,1 @@
+🧪 维基封禁巡检 · {{ lookup('pipe', 'date "+%Y-%m-%d %H:%M"') }}{{ '\n' }}扫描 {{ wiki_scanned }} 台 · {% if (wiki_blocks | length) == 0 %}✅ 无节点被封禁{% else %}⛔ {{ wiki_blocks | length }} 台存在被封禁出口{% endif %}{{ '\n' }}检测项：{{ wiki_hosts | default('zh.wikipedia.org en.wikipedia.org') }} + meta 全局封禁｜出口：{{ '原生 IPv6' if (wiki_native | default(0) | bool) else '当前出口(v4+v6)' }}
