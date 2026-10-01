@@ -26,7 +26,7 @@
   hosts: nodes
   become: true
   gather_facts: false
-  serial: "{{ ipq_serial | default(6) | int }}"
+  serial: "{{ ipq_serial | default('100%') }}"
   vars:
     ipq_url: "https://IP.Check.Place"
     ipq_raw: /tmp/ipq-raw.json
@@ -101,8 +101,6 @@
       args:
         executable: /bin/bash
       register: ipq_run
-      async: 1200
-      poll: 15
       changed_when: false
       failed_when: false
       when: not (ipq_reuse | default(0) | bool)

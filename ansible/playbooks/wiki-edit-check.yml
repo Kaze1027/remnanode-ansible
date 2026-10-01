@@ -18,7 +18,7 @@
   hosts: nodes
   become: true
   gather_facts: false
-  serial: "{{ wiki_serial | default(20) | int }}"
+  serial: "{{ wiki_serial | default('100%') }}"
   vars:
     wiki_targets_list: "{{ wiki_targets | default('zh.wikipedia.org|Wikipedia:沙盒') }}"
     wiki_tag: "{{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})"

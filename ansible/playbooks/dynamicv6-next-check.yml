@@ -19,6 +19,7 @@
   hosts: nodes
   become: true
   gather_facts: false
+  serial: "{{ dvn_serial | default('100%') }}"
   vars:
     dvn_probe_urls: "https://one.one.one.one/cdn-cgi/trace https://api6.ipify.org https://v6.ipinfo.io/ip"
     quota_warn: "{{ dvn_quota_warn_pct | default(85) | int }}"
