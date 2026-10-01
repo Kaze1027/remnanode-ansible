@@ -132,9 +132,35 @@ def media_alerts(rows):
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ipq-raw.json"
     host = sys.argv[2] if len(sys.argv) > 2 else "unknown"
-    flags = {str(a).strip().lower() for a in sys.argv[3:]}
-    detail = bool({"detail", "1", "true"} & flags)
-    alerts_only = bool({"alerts-only", "alerts", "only-alerts"} & flags)
+    detail = False
+    alerts_only = False
+    wiki_file = None
+    rest = list(sys.argv[3:])
+    i = 0
+    while i < len(rest):
+        arg = str(rest[i]).strip()
+        low = arg.lower()
+        if low == "--wiki" and i + 1 < len(rest):
+            wiki_file = rest[i + 1]
+            i += 2
+            continue
+        if low.startswith("--wiki="):
+            wiki_file = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if low in ("detail", "1", "true"):
+            detail = True
+        elif low in ("alerts-only", "alerts", "only-alerts"):
+            alerts_only = True
+        i += 1
+
+    wiki_line = ""
+    if wiki_file:
+        try:
+            with open(wiki_file, encoding="utf-8", errors="replace") as fh:
+                wiki_line = (fh.readline() or "").strip()
+        except OSError:
+            wiki_line = ""
 
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -171,18 +197,24 @@ def main():
             "abnormal": bool(short) or kind != "原生IP",
         })
 
+    wiki_blocked = "⛔" in wiki_line
+
     if alerts_only:
-        if not any(e["abnormal"] for e in entries):
+        if not any(e["abnormal"] for e in entries) and not wiki_blocked:
             return 0
         print(f"▎{host}")
         for e in entries:
             # 保留每行的 IP/组织/地区/类型；解锁信息只留非原生与异常
             print(f"{e['base']} · {e['short']}" if e["short"] else e["base"])
+        if wiki_line:
+            print(wiki_line)
         return 0
 
     print(f"▎{host}")
     for e in entries:
         print(f"{e['base']} · {e['full']}")
+    if wiki_line:
+        print(wiki_line)
     return 0
 
 

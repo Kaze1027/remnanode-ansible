@@ -55,8 +55,10 @@ BIND=""
 NATIVE=0
 JSON=0
 BLOCK_ONLY=0
+SUMMARY=0
 TAG=""
 TARGETS="$TARGETS_DEFAULT"
+SUM=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -67,6 +69,7 @@ while [ $# -gt 0 ]; do
     -H|--hosts|--targets) shift; TARGETS="${1:-}" ;;
     --json) JSON=1 ;;
     --block) BLOCK_ONLY=1 ;;
+    --summary) SUMMARY=1 ;;
     --tag) shift; TAG="${1:-}" ;;
     -t|--timeout) shift; TIMEOUT="${1:-20}" ;;
     -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
@@ -169,22 +172,42 @@ run_family() {  # $1=fam
     title=$(grep -o '<title>[^<]*' "$out" 2>/dev/null | head -1 | sed 's/<title>//')
     IFS='|' read -r verdict detail <<< "$(judge "$code" "$out")"
 
+    local famlabel="v$fam"
+    [ "$NATIVE" = 1 ] && famlabel="v$fam(原生)"
+
     case "$verdict" in
       editable)
-        [ "$BLOCK_ONLY" != 1 ] && lines+=("  $host  ✅ 可编辑（$detail ｜ $title）")
+        [ "$BLOCK_ONLY" != 1 ] && [ "$SUMMARY" != 1 ] && lines+=("  $host  ✅ 可编辑（$detail ｜ $title）")
         results="${results}{\"host\":\"$host\",\"status\":\"editable\",\"http\":$code,\"title\":\"${title}\"},"
+        SUM+=("$famlabel ✅可编辑")
         ;;
       blocked)
         any_blocked=1
-        local why=""
+        local why="" shortd="" shortr=""
         why=$(block_reason "$host" "" "$fam")
-        lines+=("  $host  ⛔ 不可编辑 ｜ $detail${why:+ ｜ $why}")
+        case "$detail" in
+          *Banned*) shortd="Banned" ;;
+          *429*) shortd="HTTP429" ;;
+          *permissions-errors*) shortd="权限受限" ;;
+          *"未返回编辑表单"*) shortd="无编辑表单" ;;
+          *) shortd="$detail" ;;
+        esac
+        if [ -n "$why" ]; then
+          local kind d
+          kind=$(printf '%s' "$why" | sed -n 's/.*维基侧: \([^·]*\) ·.*/\1/p' | tr -d ' ')
+          d=$(printf '%s' "$why" | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' | head -1)
+          shortr="${kind}${d:+·$d}"
+          [ -z "$shortr" ] && shortr="$why"
+        fi
+        [ "$BLOCK_ONLY" != 1 ] && [ "$SUMMARY" != 1 ] && lines+=("  $host  ⛔ 不可编辑 ｜ $detail${why:+ ｜ $why}")
         results="${results}{\"host\":\"$host\",\"status\":\"blocked\",\"http\":$code,\"detail\":\"$detail\",\"title\":\"${title}\"},"
+        SUM+=("$famlabel ⛔不可编辑(${shortd}${shortr:+/$shortr})")
         ;;
       *)
         any_fail=1
-        [ "$BLOCK_ONLY" != 1 ] && lines+=("  $host  ⚠️  意外状态（$detail）")
+        [ "$BLOCK_ONLY" != 1 ] && [ "$SUMMARY" != 1 ] && lines+=("  $host  ⚠️  意外状态（$detail）")
         results="${results}{\"host\":\"$host\",\"status\":\"unexpected\",\"http\":$code},"
+        SUM+=("$famlabel ⚠️$detail")
         ;;
     esac
   done
@@ -199,6 +222,8 @@ run_family() {  # $1=fam
 
   if [ "$JSON" = 1 ]; then
     printf '{"family":"v%s","ip":"%s","results":[%s]}\n' "$fam" "${ip_known:-}" "${results%,}"
+  elif [ "$SUMMARY" = 1 ]; then
+    :   # 摘要模式：统一在最后输出
   elif [ "$BLOCK_ONLY" = 1 ]; then
     if [ "$any_blocked" = 1 ]; then
       print_header
@@ -215,7 +240,7 @@ run_family() {  # $1=fam
   return 0
 }
 
-if [ "$JSON" != 1 ] && [ "$BLOCK_ONLY" != 1 ]; then
+if [ "$JSON" != 1 ] && [ "$BLOCK_ONLY" != 1 ] && [ "$SUMMARY" != 1 ]; then
   echo "=== 维基百科可编辑性检测 · $(hostname) · $(date '+%Y-%m-%d %H:%M:%S') ==="
 fi
 
@@ -227,6 +252,13 @@ for f in "${fams[@]}"; do
   [ "$r" = 1 ] && rc=1
   [ "$r" = 2 ] && [ "$rc" != 1 ] && rc=2
 done
+
+if [ "$SUMMARY" = 1 ]; then
+  sum_out=""
+  for s in "${SUM[@]:-}"; do sum_out="${sum_out}${sum_out:+ ｜ }${s}"; done
+  printf 'wiki 可编辑性: %s\n' "${sum_out:-n/a}"
+  exit "$rc"
+fi
 
 if [ "$JSON" != 1 ] && [ "$BLOCK_ONLY" != 1 ]; then
   case "$rc" in

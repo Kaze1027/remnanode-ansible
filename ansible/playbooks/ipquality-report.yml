@@ -32,6 +32,7 @@
     ipq_raw: /tmp/ipq-raw.json
     ipq_dir: /var/lib/ipquality
     ipq_parser: /usr/local/bin/ipq-parse.py
+    ipq_wiki_file: /tmp/ipq-wiki.txt
     ipq_flags: "{{ ipq_cli_flags | default('-f -n -p -j') }}"
     ipq_pkgs:
       - curl
@@ -105,6 +106,20 @@
       failed_when: false
       when: not (ipq_reuse | default(0) | bool)
 
+    - name: 部署维基可编辑性检测脚本（并入解锁报告）
+      ansible.builtin.copy:
+        src: files/wiki-edit-check.sh
+        dest: /usr/local/bin/wiki-edit-check.sh
+        mode: "0755"
+
+    - name: 维基百科可编辑性（当前出口 v4+v6，一行摘要）
+      ansible.builtin.shell: |
+        /usr/local/bin/wiki-edit-check.sh --summary > {{ ipq_wiki_file }} 2>/dev/null || true
+        cat {{ ipq_wiki_file }}
+      register: ipq_wiki
+      changed_when: false
+      failed_when: false
+
     - name: 解析为可读分行文本（默认仅异常）
       ansible.builtin.shell: >-
         python3 {{ ipq_parser }}
@@ -112,13 +127,14 @@
         '{{ ansible_host | default(inventory_hostname) }}'
         {{ 'detail' if (ipq_media_detail | default(0) | bool) else '' }}
         {{ 'alerts-only' if (ipq_alerts_only | default(1) | bool) else '' }}
+        --wiki {{ ipq_wiki_file }}
       register: ipq_lines
       changed_when: false
       failed_when: false
 
     - name: 采集结果
       ansible.builtin.debug:
-        msg: "{{ ipq_run.stdout | default('(no stdout)') }}"
+        msg: "{{ ipq_run.stdout | default('(no stdout)') }} ｜ {{ ipq_wiki.stdout | default('') | trim }}"
 
 - name: Aggregate and notify Telegram
   hosts: localhost
