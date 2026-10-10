@@ -165,6 +165,7 @@
         '{{ ansible_host | default(inventory_hostname) }}'
         {{ 'detail' if (ipq_media_detail | default(0) | bool) else '' }}
         {{ 'alerts-only' if (ipq_alerts_only | default(1) | bool) else '' }}
+        {{ 'show-dns' if (ipq_show_dns | default(0) | bool) else '' }}
         --wiki {{ ipq_wiki_file }}
         --client {{ ipq_client_file }}
         | iconv -f UTF-8 -t UTF-8 -c

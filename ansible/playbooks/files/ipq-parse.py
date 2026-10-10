@@ -115,19 +115,19 @@ def media_full(rows, detail=False):
     return "⚠️ " + " ".join(bad) + tail
 
 
-def media_alerts(rows):
-    """仅异常模式：只保留非原生 + 异常项；完全正常返回空串。"""
+def media_alerts(rows, show_dns=False):
+    """仅异常模式：只保留异常项（非原生解锁默认隐藏，可用 show_dns 打开）。"""
     bad, dns = [], []
     for label, status, region, kind in rows:
         if status != "解锁":
-            bad.append(f"{label}{SYM.get(status, '?')}")
+            bad.append(f"{label}{SYM.get(status, '❓')}")
         elif kind and kind not in NATIVE:
             short_kind = "DNS" if kind.lower() in ("viadns", "dns") else kind
             dns.append(f"{label}·{short_kind}")
-    if not bad and not dns:
+    if not bad and not (dns and show_dns):
         return ""
     text = ("⚠️ " + " ".join(bad)) if bad else "⚠️"
-    if dns:
+    if dns and show_dns:
         text += " " + " ".join(dns)
     return text.strip()
 
@@ -157,6 +157,7 @@ def main():
     host = sys.argv[2] if len(sys.argv) > 2 else "unknown"
     detail = False
     alerts_only = False
+    show_dns = False
     wiki_file = None
     client_file = None
     rest = list(sys.argv[3:])
@@ -184,6 +185,8 @@ def main():
             detail = True
         elif low in ("alerts-only", "alerts", "only-alerts"):
             alerts_only = True
+        elif low in ("show-dns", "--show-dns"):
+            show_dns = True
         i += 1
 
     client_line = ""
@@ -229,7 +232,7 @@ def main():
         place = f"{region}·{city}" if city != "-" else region
         base = f"{family} · {ip} · {org} · {place} · {kind}"
         rows = rows_of(obj.get("Media"))
-        short = media_alerts(rows)
+        short = media_alerts(rows, show_dns)
         entries.append({
             "base": base,
             "full": media_full(rows, detail),

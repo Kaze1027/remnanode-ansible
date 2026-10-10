@@ -1,4 +1,4 @@
 🧪 IP 质量巡检 · {{ lookup('pipe', 'date "+%m-%d %H:%M"') }}{{ '\n' }}扫描 {{ ipq_scanned }} · 异常 {{ ipq_hosts }} · 客户端异常 {{ ipq_client_bad | default(0) }}{{ '\n' }}{{ '\n' }}📋 检测项{{ '\n' }}· 客户端：服务/默认路由/metric99/出口/配额/sync{{ '\n' }}· 媒体：TikTok Disney+ Netflix YouTube AmazonPrime Reddit ChatGPT{{ '\n' }}· 其他：IP 类型是否原生 · 维基百科可编辑性{{ '\n' }}{{ '\n' }}📚 维基（v4 优先）：v4 可编辑 {{ ipq_wiki_v4_ok | default(0) }} 台 · v4 不可编辑 {{ ipq_wiki_bad | default(0) }} 台{% if (ipq_wiki_bad | default(0) | int) > 0 %}（其中 v6 也不行 {{ ipq_wiki_v4_bad | default(0) }} 台{% if (ipq_wiki_reason | default('')) %} ｜ {{ ipq_wiki_reason }}{% endif %}）{% endif %}{{ '\n' }}
 {%- if (ipq_hosts | int) == 0 %}{{ '\n' }}✅ 全部正常{{ '\n' }}
-{%- else %}{{ '\n' }}⚠️ 仅列异常出口（未列出即正常）{{ '\n' }}图例：✅ 正常 · ❌ 媒体不可用 · ⛔ 封禁/不可编辑 · ·DNS 非原生解锁{{ '\n' }}
+{%- else %}{{ '\n' }}⚠️ 仅列异常出口（未列出即正常）{{ '\n' }}图例：✅ 正常 · ❌ 媒体不可用 · ⛔ 封禁/不可编辑{% if (ipq_show_dns | default(0) | bool) %} · ·DNS 非原生解锁{% endif %}{{ '\n' }}
 {%- endif %}
