@@ -131,18 +131,23 @@ def media_alerts(rows):
 
 
 def compact_wiki(wiki_line):
-    """'v4 ✅ · v6 ⛔ 权限受限·全站封禁·至12-27' → 'v4✅v6⛔'"""
+    """'v4 ✅' / 'v4 ⛔ 权限受限·全站封禁·至12-27 · v6 ✅' → 'v4✅' / 'v4⛔→v6✅'"""
     text = (wiki_line or "").strip()
     if not text:
         return ""
-    out = []
+    pairs = []
     for token in text.split(" · "):
-        token = token.strip()
-        if not token:
-            continue
-        fields = token.split(" ")
-        out.append("".join(fields[:2]))
-    return "".join(out)
+        fields = token.strip().split(" ")
+        if len(fields) >= 2:
+            pairs.append((fields[0], fields[1]))
+    result = {fam: mark for fam, mark in pairs}
+    if "v4" in result:
+        if result["v4"] == "✅":
+            return "v4✅"
+        if "v6" in result:
+            return f"v4⛔→v6{result['v6']}"
+        return "v4⛔"
+    return "".join(f"{fam}{mark}" for fam, mark in pairs)
 
 
 def main():

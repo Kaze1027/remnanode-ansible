@@ -150,9 +150,9 @@
       changed_when: false
       failed_when: false
 
-    - name: 维基百科可编辑性（当前出口 v4+v6，一行摘要）
+    - name: 维基百科可编辑性（v4 优先；v4 不可用才测 v6）
       ansible.builtin.shell: |
-        /usr/local/bin/wiki-edit-check.sh --summary 2>/dev/null | iconv -f UTF-8 -t UTF-8 -c > {{ ipq_wiki_file }} || true
+        /usr/local/bin/wiki-edit-check.sh --summary --prefer-v4 2>/dev/null | iconv -f UTF-8 -t UTF-8 -c > {{ ipq_wiki_file }} || true
         iconv -f UTF-8 -t UTF-8 -c < {{ ipq_wiki_file }}
       register: ipq_wiki
       changed_when: false
@@ -201,11 +201,12 @@
         ipq_client_bad: "{{ ipq_blocks | flatten | select('search', '🧩⚠️') | list | length }}"
         ipq_wiki_lines: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_wiki') | select('defined') | selectattr('stdout', 'defined') | map(attribute='stdout') | map('trim') | select('truthy') | list }}"
 
-    - name: 维基计数
+    - name: 维基计数（v4 优先口径）
       ansible.builtin.set_fact:
-        ipq_wiki_bad: "{{ ipq_wiki_lines | select('search', 'v6 ⛔') | list | length }}"
-        ipq_wiki_v4_bad: "{{ ipq_wiki_lines | select('search', 'v4 ⛔') | list | length }}"
-        ipq_wiki_reason: "{{ (ipq_wiki_lines | select('search', 'v6 ⛔') | map('regex_replace', '^.*v6 ⛔ ', '') | map('regex_replace', ' · .*$', '') | list | unique | first) | default('') }}"
+        ipq_wiki_v4_ok: "{{ ipq_wiki_lines | select('search', 'v4 ✅') | list | length }}"
+        ipq_wiki_bad: "{{ ipq_wiki_lines | select('search', 'v4 ⛔') | list | length }}"
+        ipq_wiki_v4_bad: "{{ ipq_wiki_lines | select('search', 'v4 ⛔') | select('search', 'v6 ⛔') | list | length }}"
+        ipq_wiki_reason: "{{ (ipq_wiki_lines | select('search', 'v4 ⛔') | map('regex_replace', '^.*v4 ⛔ ', '') | map('regex_replace', ' · .*$', '') | list | unique | first) | default('') }}"
 
     - name: 汇总头
       ansible.builtin.set_fact:
@@ -219,14 +220,38 @@
       ansible.builtin.debug:
         msg: "{{ [ipq_header] + (ipq_blocks | flatten) }}"
 
-    - name: 异常清单推送 Telegram（分片）
+    - name: 推送汇总（第 1 条，始终发送）
       ansible.builtin.uri:
         url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
         method: POST
         body_format: json
         body:
           chat_id: "{{ tg_chat }}"
-          text: "{{ (ipq_header ~ '\n\n' if idx == 0 else '') ~ (item | map('join', '\n') | join('\n\n')) }}"
+          parse_mode: HTML
+          text: "{{ ipq_header | replace('&', '&amp;') | replace('<', '&lt;') | replace('>', '&gt;') }}"
+          disable_web_page_preview: true
+        status_code: 200
+        timeout: 20
+      when:
+        - tg_enabled | int == 1
+        - tg_token | length > 0
+        - tg_chat | length > 0
+      no_log: true
+      ignore_errors: true
+      register: ipq_tg_head
+
+    - name: 推送明细（分片，默认折叠，点击展开）
+      ansible.builtin.uri:
+        url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
+        method: POST
+        body_format: json
+        body:
+          chat_id: "{{ tg_chat }}"
+          parse_mode: HTML
+          text: >-
+            ⚠️ 异常明细 {{ idx + 1 }}/{{ ipq_chunks | length }}（点击展开）
+            {{ '\n' }}<blockquote expandable>{{ (item | map('join', '\n') | join('\n\n'))
+              | replace('&', '&amp;') | replace('<', '&lt;') | replace('>', '&gt;') }}</blockquote>
           disable_web_page_preview: true
         status_code: 200
         timeout: 20
@@ -243,29 +268,9 @@
       ignore_errors: true
       register: ipq_tg
 
-    - name: 全部正常时的一条通知
-      ansible.builtin.uri:
-        url: "https://api.telegram.org/bot{{ tg_token }}/sendMessage"
-        method: POST
-        body_format: json
-        body:
-          chat_id: "{{ tg_chat }}"
-          text: "{{ ipq_header }}"
-          disable_web_page_preview: true
-        status_code: 200
-        timeout: 20
-      when:
-        - tg_enabled | int == 1
-        - tg_token | length > 0
-        - tg_chat | length > 0
-        - ipq_blocks | length == 0
-      no_log: true
-      ignore_errors: true
-      register: ipq_tg_ok
-
     - name: 推送结果
       ansible.builtin.debug:
         msg:
           - "扫描 {{ ipq_scanned }} 台 · 异常 {{ ipq_hosts }} 台 · 正常 {{ (ipq_scanned | int) - (ipq_hosts | int) }} 台"
           - "模式: {{ '仅异常' if alerts_only | int == 1 else '全部节点' }} ｜ 明细: {{ '逐项解锁方式' if (ipq_media_detail | default(0) | bool) else '紧凑' }}"
-          - "Telegram 分片: {{ ipq_chunks | length }} 片 ｜ HTTP: {{ (ipq_tg.results | default([]) | selectattr('status', 'defined') | map(attribute='status') | list) if (ipq_tg is defined and ipq_tg.results is defined) else 'skipped' }}"
+          - "Telegram 汇总: {{ (ipq_tg_head.status | default('skipped')) }} ｜ 明细分片: {{ ipq_chunks | length }} 片 ｜ HTTP: {{ (ipq_tg.results | default([]) | selectattr('status', 'defined') | map(attribute='status') | list) if (ipq_tg is defined and ipq_tg.results is defined) else 'skipped' }}"

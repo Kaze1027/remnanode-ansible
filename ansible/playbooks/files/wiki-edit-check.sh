@@ -56,6 +56,7 @@ NATIVE=0
 JSON=0
 BLOCK_ONLY=0
 SUMMARY=0
+PREFER_V4=0
 TAG=""
 TARGETS="$TARGETS_DEFAULT"
 SUM=()
@@ -66,6 +67,7 @@ while [ $# -gt 0 ]; do
     -6) FAMILY=6 ;;
     -i) shift; BIND="${1:-}" ;;
     --native) NATIVE=1; FAMILY=6 ;;
+    --prefer-v4) PREFER_V4=1 ;;
     -H|--hosts|--targets) shift; TARGETS="${1:-}" ;;
     --json) JSON=1 ;;
     --block) BLOCK_ONLY=1 ;;
@@ -249,12 +251,25 @@ fi
 
 rc=0
 fams=()
-if [ -n "$FAMILY" ]; then fams=("$FAMILY"); else fams=(4 6); fi
+if [ -n "$FAMILY" ]; then
+  fams=("$FAMILY")
+elif [ "$PREFER_V4" = 1 ]; then
+  # v4 优先：能用 v4 就不必测 v6；v4 失败才回退测 v6
+  fams=(4)
+else
+  fams=(4 6)
+fi
 for f in "${fams[@]}"; do
   run_family "$f"; r=$?
   [ "$r" = 1 ] && rc=1
   [ "$r" = 2 ] && [ "$rc" != 1 ] && rc=2
 done
+# v4 优先模式下：v4 不可用时再补测 v6
+if [ "$PREFER_V4" = 1 ] && [ -z "$FAMILY" ] && [ "$rc" != 0 ]; then
+  run_family 6; r6=$?
+  [ "$r6" = 1 ] && rc=1
+  [ "$r6" = 2 ] && [ "$rc" != 1 ] && rc=2
+fi
 
 if [ "$SUMMARY" = 1 ]; then
   sum_out=""
