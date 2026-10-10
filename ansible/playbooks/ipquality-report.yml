@@ -185,6 +185,7 @@
     tg_token: "{{ telegram_bot_token | default('') }}"
     tg_chat: "{{ telegram_chat_id | default('') }}"
     alerts_only: "{{ ipq_alerts_only | default(1) | int }}"
+    nl: "\n"
   tasks:
     - name: 汇总异常节点文本块（正常节点为空，自动排除）
       ansible.builtin.set_fact:
@@ -249,8 +250,7 @@
           chat_id: "{{ tg_chat }}"
           parse_mode: HTML
           text: >-
-            ⚠️ 异常明细 {{ idx + 1 }}/{{ ipq_chunks | length }}（点击展开）
-            {{ '\n' }}<blockquote expandable>{{ (item | map('join', '\n') | join('\n\n'))
+            ⚠️ 异常明细 {{ idx + 1 }}/{{ ipq_chunks | length }}（点击展开）{{ nl }}<blockquote expandable>{{ (item | map('join', nl) | join(nl ~ nl))
               | replace('&', '&amp;') | replace('<', '&lt;') | replace('>', '&gt;') }}</blockquote>
           disable_web_page_preview: true
         status_code: 200
