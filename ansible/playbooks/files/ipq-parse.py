@@ -26,7 +26,7 @@ SERVICES = [
     ("Reddit", "Reddit"),
     ("ChatGPT", "ChatGPT"),
 ]
-SYM = {"解锁": "✔", "屏蔽": "✘", "失败": "✖"}
+SYM = {"解锁": "✅", "屏蔽": "❌", "失败": "❌", "?": "❓"}
 PLACEHOLDER = {"", "null", "none", "n/a", "na"}
 NATIVE = {"原生", "native"}
 
@@ -96,12 +96,14 @@ def media_full(rows, detail=False):
     if detail:
         parts = []
         for label, status, region, kind in rows:
-            sym = SYM.get(status, "?")
-            extra = f"·{kind}" if kind and kind not in NATIVE else ("·原生" if status == "解锁" else "")
-            parts.append(f"{label} {sym}{region}{extra}")
+            if status == "解锁":
+                extra = f"·{kind}" if kind and kind not in NATIVE else "·原生"
+                parts.append(f"{label} ✅{region}{extra}")
+            else:
+                parts.append(f"{label} {SYM.get(status, '❓')}{status}")
         return " ｜ ".join(parts)
     unlocked = [r for r in rows if r[1] == "解锁"]
-    bad = [f"{label}{SYM.get(status, '?')}" for label, status, _, _ in rows if status != "解锁"]
+    bad = [f"{label}{SYM.get(status, '❓')}" for label, status, _, _ in rows if status != "解锁"]
     nonnative = [label for label, status, _, kind in rows if status == "解锁" and kind and kind not in NATIVE]
     if not bad:
         head = f"✅ 全解锁（{len(unlocked)}/{len(rows)}"
@@ -124,7 +126,7 @@ def media_alerts(rows):
             dns.append(f"{label}·{short_kind}")
     if not bad and not dns:
         return ""
-    text = "⚠️" + " ".join(bad) if bad else "⚠️"
+    text = ("⚠️ " + " ".join(bad)) if bad else "⚠️"
     if dns:
         text += " " + " ".join(dns)
     return text.strip()
