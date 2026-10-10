@@ -129,6 +129,21 @@ def media_alerts(rows):
     return text.strip()
 
 
+def compact_wiki(wiki_line):
+    """'v4 ✅ · v6 ⛔ 权限受限·全站封禁·至12-27' → 'v4✅v6⛔'"""
+    text = (wiki_line or "").strip()
+    if not text:
+        return ""
+    out = []
+    for token in text.split(" · "):
+        token = token.strip()
+        if not token:
+            continue
+        fields = token.split(" ")
+        out.append("".join(fields[:2]))
+    return "".join(out)
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ipq-raw.json"
     host = sys.argv[2] if len(sys.argv) > 2 else "unknown"
@@ -224,26 +239,32 @@ def main():
     if alerts_only:
         if not any(e["abnormal"] for e in entries) and not wiki_blocked and not client_bad:
             return 0
-        # ---- 手机友好排版：一要点一行，行宽尽量 ≤ 50 字符 ----
-        print(f"📍 {host}")
+        # ---- 手机版：每台 2 行 ----
+        #   第 1 行：📍 节点 · 国家 · 🧩 客户端状态
+        #   第 2 行：🌐 v4 IP 结论 ｜ 🌐 v6 IP 结论 ｜ 📚 维基结论
+        v6 = next((e for e in entries if e["family"] == "v6"), None)
+        v4 = next((e for e in entries if e["family"] == "v4"), None)
+        src = v6 or v4
+        head1 = f"📍 {host}"
+        if src:
+            head1 += f" · {src['place'].split('·')[0]}"
         if client_line:
-            print(f"🧩 {client_line}")
+            head1 += f" · 🧩{client_line}"
+        print(head1)
+
+        parts = []
         for e in entries:
-            head = f"🌐 {e['family']} {e['ip']} · {e['place']}"
-            notes = []
-            if e["short"]:
-                notes.append(e["short"])
+            flag = e["short"].replace(" ", "") if e["short"] else ""
             if e["kind"] != "原生IP":
-                notes.append(f"⚠️ 非原生({e['kind']})")
-            if notes and len(head) + 3 + len(notes[0]) <= 52:
-                print(f"{head} · {notes[0]}")
-                notes = notes[1:]
-            else:
-                print(head)
-            for n in notes:
-                print(f"   {n}")
-        if wiki_line:
-            print(f"📚 wiki {wiki_line}")
+                flag += f"⚠️非原生({e['kind']})"
+            if not flag:
+                flag = "✅"
+            parts.append(f"🌐 {e['family']} {e['ip']} {flag}")
+        line2 = " ｜ ".join(parts)
+        wiki_short = compact_wiki(wiki_line)
+        if wiki_short:
+            line2 += f" ｜ 📚{wiki_short}"
+        print(line2)
         return 0
 
     print(f"▎{host}")

@@ -141,7 +141,7 @@
         if [ -n "$BADS" ]; then
           printf '⚠️ %s\n' "$BADS" > {{ ipq_client_file }}
         else
-          printf '✅ %s · m99✓ · 出口✓ · 用量%s%% · sf%s\n' "$PREF" "${PCT:--1}" "$SF" > {{ ipq_client_file }}
+          printf '✅ %s 用量%s%% sf%s\n' "$PREF" "${PCT:--1}" "$SF" > {{ ipq_client_file }}
         fi
         cat {{ ipq_client_file }}
       args:
@@ -194,11 +194,17 @@
         ipq_scanned: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | list | length }}"
         ipq_hosts: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list | length }}"
 
-    - name: 统计客户端异常 / 维基不可编辑（来自异常块内容）
+    - name: 统计客户端异常 / 维基汇总（v4、v6 不可编辑台数与常见原因）
       ansible.builtin.set_fact:
         ipq_flat_lines: "{{ ipq_blocks | flatten | list }}"
-        ipq_client_bad: "{{ ipq_blocks | flatten | select('match', '^🧩 ⚠️') | list | length }}"
-        ipq_wiki_bad: "{{ ipq_blocks | flatten | select('match', '^📚 wiki') | select('search', '⛔') | list | length }}"
+        ipq_client_bad: "{{ ipq_blocks | flatten | select('search', '🧩⚠️') | list | length }}"
+        ipq_wiki_lines: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_wiki') | select('defined') | map(attribute='stdout') | map('trim') | select('truthy') | list }}"
+
+    - name: 维基计数
+      ansible.builtin.set_fact:
+        ipq_wiki_bad: "{{ ipq_wiki_lines | select('search', 'v6 ⛔') | list | length }}"
+        ipq_wiki_v4_bad: "{{ ipq_wiki_lines | select('search', 'v4 ⛔') | list | length }}"
+        ipq_wiki_reason: "{{ (ipq_wiki_lines | select('search', 'v6 ⛔') | map('regex_replace', '^.*v6 ⛔ ', '') | map('regex_replace', ' · .*$', '') | list | unique | first) | default('') }}"
 
     - name: 汇总头
       ansible.builtin.set_fact:
