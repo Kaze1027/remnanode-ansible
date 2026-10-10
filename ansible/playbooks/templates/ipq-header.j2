@@ -1,3 +1,4 @@
-🧪 IP 质量巡检 · {{ lookup('pipe', 'date "+%Y-%m-%d %H:%M"') }}{{ '\n' }}扫描 {{ ipq_scanned }} 台 · 异常 {{ ipq_hosts }} 台 · 正常 {{ (ipq_scanned | int) - (ipq_hosts | int) }} 台 · 客户端异常 {{ ipq_client_bad | default(0) }} 台 · 维基不可编辑 {{ ipq_wiki_bad | default(0) }} 台{{ '\n' }}检测项：客户端状态 · 媒体解锁(TikTok/Disney+/Netflix/YouTube/AmazonPrime/Reddit/ChatGPT) · IP类型是否原生 · 维基百科可编辑性
-{% if (ipq_hosts | int) == 0 %}✅ 全部正常
-{%- else %}仅列异常：客户端⚠️ / ✘媒体屏蔽 / ✖检测失败 / 非原生解锁(DNS) / 非原生IP / 维基不可编辑{% endif %}
+🧪 IP 质量巡检 · {{ lookup('pipe', 'date "+%m-%d %H:%M"') }}{{ '\n' }}扫描 {{ ipq_scanned }} · 异常 {{ ipq_hosts }} · 客户端异常 {{ ipq_client_bad | default(0) }} · 维基不可编辑 {{ ipq_wiki_bad | default(0) }}{{ '\n' }}{{ '\n' }}📋 检测项{{ '\n' }}· 客户端：服务/默认路由/metric99/出口/配额/sync{{ '\n' }}· 媒体：TikTok Disney+ Netflix YouTube AmazonPrime Reddit ChatGPT{{ '\n' }}· 其他：IP 类型是否原生 · 维基百科可编辑性{{ '\n' }}
+{%- if (ipq_hosts | int) == 0 %}{{ '\n' }}✅ 全部正常{{ '\n' }}
+{%- else %}{{ '\n' }}⚠️ 仅列异常出口（未列出即正常）{{ '\n' }}
+{%- endif %}

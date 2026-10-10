@@ -137,11 +137,11 @@
         [ "${PCT:--1}" -ge {{ dvn_quota_warn }} ] && BAD+=("配额 ${PCT}%")
         [ "${SF:-0}" -gt 3 ] && BAD+=("sync失败 ${SF}")
         BADS=""
-        for b in "${BAD[@]}"; do BADS="${BADS}${BADS:+ ｜ }$b"; done
+        for b in "${BAD[@]}"; do BADS="${BADS}${BADS:+ · }$b"; done
         if [ -n "$BADS" ]; then
-          printf '客户端: ⚠️ %s ｜ 出口 %s\n' "$BADS" "$OUT" > {{ ipq_client_file }}
+          printf '⚠️ %s\n' "$BADS" > {{ ipq_client_file }}
         else
-          printf '客户端: ✅ %s ｜ metric99 ✓ ｜ 出口可达 ｜ 用量 %s%% ｜ sync失败 %s\n' "$PREF" "${PCT:--1}" "$SF" > {{ ipq_client_file }}
+          printf '✅ %s · m99✓ · 出口✓ · 用量%s%% · sf%s\n' "$PREF" "${PCT:--1}" "$SF" > {{ ipq_client_file }}
         fi
         cat {{ ipq_client_file }}
       args:
@@ -197,8 +197,8 @@
     - name: 统计客户端异常 / 维基不可编辑（来自异常块内容）
       ansible.builtin.set_fact:
         ipq_flat_lines: "{{ ipq_blocks | flatten | list }}"
-        ipq_client_bad: "{{ ipq_blocks | flatten | select('match', '^客户端: ⚠️') | list | length }}"
-        ipq_wiki_bad: "{{ ipq_blocks | flatten | select('match', '^wiki 可编辑性:') | select('search', '⛔') | list | length }}"
+        ipq_client_bad: "{{ ipq_blocks | flatten | select('match', '^🧩 ⚠️') | list | length }}"
+        ipq_wiki_bad: "{{ ipq_blocks | flatten | select('match', '^📚 wiki') | select('search', '⛔') | list | length }}"
 
     - name: 汇总头
       ansible.builtin.set_fact:

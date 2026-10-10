@@ -179,7 +179,7 @@ run_family() {  # $1=fam
       editable)
         [ "$BLOCK_ONLY" != 1 ] && [ "$SUMMARY" != 1 ] && lines+=("  $host  ✅ 可编辑（$detail ｜ $title）")
         results="${results}{\"host\":\"$host\",\"status\":\"editable\",\"http\":$code,\"title\":\"${title}\"},"
-        SUM+=("$famlabel ✅可编辑")
+        SUM+=("$famlabel ✅")
         ;;
       blocked)
         any_blocked=1
@@ -196,12 +196,15 @@ run_family() {  # $1=fam
           local kind d
           kind=$(printf '%s' "$why" | sed -n 's/.*维基侧: \([^·]*\) ·.*/\1/p' | tr -d ' ')
           d=$(printf '%s' "$why" | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' | head -1)
-          shortr="${kind}${d:+·$d}"
+          [ -n "$d" ] && d="${d#????-}"
+          shortr="${kind}${d:+·至$d}"
           [ -z "$shortr" ] && shortr="$why"
         fi
         [ "$BLOCK_ONLY" != 1 ] && [ "$SUMMARY" != 1 ] && lines+=("  $host  ⛔ 不可编辑 ｜ $detail${why:+ ｜ $why}")
         results="${results}{\"host\":\"$host\",\"status\":\"blocked\",\"http\":$code,\"detail\":\"$detail\",\"title\":\"${title}\"},"
-        SUM+=("$famlabel ⛔不可编辑(${shortd}${shortr:+/$shortr})")
+        local det="$shortd"
+        [ -n "$shortr" ] && det="${det}${det:+·}${shortr}"
+        SUM+=("$famlabel ⛔${det:+ $det}")
         ;;
       *)
         any_fail=1
@@ -255,8 +258,8 @@ done
 
 if [ "$SUMMARY" = 1 ]; then
   sum_out=""
-  for s in "${SUM[@]:-}"; do sum_out="${sum_out}${sum_out:+ ｜ }${s}"; done
-  printf 'wiki 可编辑性: %s\n' "${sum_out:-n/a}"
+  for s in "${SUM[@]:-}"; do sum_out="${sum_out}${sum_out:+ · }${s}"; done
+  printf '%s\n' "${sum_out:-n/a}"
   exit "$rc"
 fi
 

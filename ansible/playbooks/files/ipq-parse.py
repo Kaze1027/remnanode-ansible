@@ -211,6 +211,10 @@ def main():
             "base": base,
             "full": media_full(rows, detail),
             "short": short,
+            "family": family,
+            "ip": ip,
+            "place": place,
+            "kind": kind,
             "abnormal": bool(short) or kind != "原生IP",
         })
 
@@ -220,19 +224,31 @@ def main():
     if alerts_only:
         if not any(e["abnormal"] for e in entries) and not wiki_blocked and not client_bad:
             return 0
-        print(f"▎{host}")
+        # ---- 手机友好排版：一要点一行，行宽尽量 ≤ 50 字符 ----
+        print(f"📍 {host}")
         if client_line:
-            print(client_line)
+            print(f"🧩 {client_line}")
         for e in entries:
-            # 保留每行的 IP/组织/地区/类型；解锁信息只留非原生与异常
-            print(f"{e['base']} · {e['short']}" if e["short"] else e["base"])
+            head = f"🌐 {e['family']} {e['ip']} · {e['place']}"
+            notes = []
+            if e["short"]:
+                notes.append(e["short"])
+            if e["kind"] != "原生IP":
+                notes.append(f"⚠️ 非原生({e['kind']})")
+            if notes and len(head) + 3 + len(notes[0]) <= 52:
+                print(f"{head} · {notes[0]}")
+                notes = notes[1:]
+            else:
+                print(head)
+            for n in notes:
+                print(f"   {n}")
         if wiki_line:
-            print(wiki_line)
+            print(f"📚 wiki {wiki_line}")
         return 0
 
     print(f"▎{host}")
     if client_line:
-        print(client_line)
+        print(f"客户端: {client_line}")
     for e in entries:
         print(f"{e['base']} · {e['full']}")
     if wiki_line:
