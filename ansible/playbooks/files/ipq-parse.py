@@ -120,12 +120,13 @@ def media_alerts(rows):
         if status != "解锁":
             bad.append(f"{label}{SYM.get(status, '?')}")
         elif kind and kind not in NATIVE:
-            dns.append(f"{label}({kind})")
+            short_kind = "DNS" if kind.lower() in ("viadns", "dns") else kind
+            dns.append(f"{label}·{short_kind}")
     if not bad and not dns:
         return ""
-    text = "⚠️ " + " ".join(bad) if bad else "⚠️"
+    text = "⚠️" + " ".join(bad) if bad else "⚠️"
     if dns:
-        text += (" ｜ " if bad else " ") + "非原生解锁: " + " ".join(dns)
+        text += " " + " ".join(dns)
     return text.strip()
 
 
@@ -254,9 +255,9 @@ def main():
 
         parts = []
         for e in entries:
-            flag = e["short"].replace(" ", "") if e["short"] else ""
+            flag = e["short"] if e["short"] else ""
             if e["kind"] != "原生IP":
-                flag += f"⚠️非原生({e['kind']})"
+                flag += f" ⚠️非原生({e['kind']})"
             if not flag:
                 flag = "✅"
             parts.append(f"🌐 {e['family']} {e['ip']} {flag}")
