@@ -33,6 +33,9 @@
     ipq_dir: /var/lib/ipquality
     ipq_parser: /usr/local/bin/ipq-parse.py
     ipq_wiki_file: /tmp/ipq-wiki.txt
+    ipq_client_file: /tmp/ipq-client.txt
+    ipq_probe_urls: "https://one.one.one.one/cdn-cgi/trace https://api6.ipify.org https://v6.ipinfo.io/ip"
+    dvn_quota_warn: "{{ dvn_quota_warn_pct | default(85) | int }}"
     ipq_flags: "{{ ipq_cli_flags | default('-f -n -p -j') }}"
     ipq_pkgs:
       - curl
@@ -112,6 +115,41 @@
         dest: /usr/local/bin/wiki-edit-check.sh
         mode: "0755"
 
+    - name: DynamicV6 Next 客户端状态（一行摘要，含服务/出口/默认路由/metric99/配额/sync）
+      ansible.builtin.shell: |
+        SVC=$(systemctl is-active dynamicv6-next-guest.service 2>/dev/null || echo inactive)
+        [ -s /tmp/dvn.sh ] || curl -4 -fsSL --max-time 25 "{{ dvn_script_url | default('https://aethercloud.io/experimental-ipv6.sh') }}" -o /tmp/dvn.sh 2>/dev/null
+        JS=$(bash /tmp/dvn.sh status --json 2>/dev/null)
+        PREF=$(printf '%s' "$JS" | jq -r '.default_preference // "?"' 2>/dev/null)
+        OUT=$(printf '%s' "$JS" | jq -r '.outbound_ipv6 // "none"' 2>/dev/null)
+        PCT=$(printf '%s' "$JS" | jq -r 'if (.usage.limit_bytes // 0) > 0 then (((.usage.charged_bytes // 0) * 100 / .usage.limit_bytes) | floor) else -1 end' 2>/dev/null)
+        M99=$(ip -6 route show default | grep -c 'metric 99' || true)
+        HEALTH=FAIL
+        for u in {{ ipq_probe_urls }}; do
+          curl -6 -fsS --noproxy '*' --connect-timeout 3 --max-time 5 "$u" >/dev/null 2>&1 && { HEALTH=OK; break; }
+        done
+        SF=$(journalctl -u dynamicv6-next-guest.service --since '15 min ago' --no-pager 2>/dev/null | grep -c 'sync failed' || true)
+        BAD=()
+        [ "$SVC" != "active" ] && BAD+=("服务=$SVC")
+        [ "$HEALTH" != "OK" ] && BAD+=("出口不可达")
+        [ "$PREF" != "leased" ] && BAD+=("默认=$PREF")
+        [ "${M99:-0}" -lt 1 ] && BAD+=("缺 metric99")
+        [ "${PCT:--1}" -ge {{ dvn_quota_warn }} ] && BAD+=("配额 ${PCT}%")
+        [ "${SF:-0}" -gt 3 ] && BAD+=("sync失败 ${SF}")
+        BADS=""
+        for b in "${BAD[@]}"; do BADS="${BADS}${BADS:+ ｜ }$b"; done
+        if [ -n "$BADS" ]; then
+          printf '客户端: ⚠️ %s ｜ 出口 %s\n' "$BADS" "$OUT" > {{ ipq_client_file }}
+        else
+          printf '客户端: ✅ %s ｜ metric99 ✓ ｜ 出口可达 ｜ 用量 %s%% ｜ sync失败 %s\n' "$PREF" "${PCT:--1}" "$SF" > {{ ipq_client_file }}
+        fi
+        cat {{ ipq_client_file }}
+      args:
+        executable: /bin/bash
+      register: ipq_client
+      changed_when: false
+      failed_when: false
+
     - name: 维基百科可编辑性（当前出口 v4+v6，一行摘要）
       ansible.builtin.shell: |
         /usr/local/bin/wiki-edit-check.sh --summary > {{ ipq_wiki_file }} 2>/dev/null || true
@@ -128,13 +166,14 @@
         {{ 'detail' if (ipq_media_detail | default(0) | bool) else '' }}
         {{ 'alerts-only' if (ipq_alerts_only | default(1) | bool) else '' }}
         --wiki {{ ipq_wiki_file }}
+        --client {{ ipq_client_file }}
       register: ipq_lines
       changed_when: false
       failed_when: false
 
     - name: 采集结果
       ansible.builtin.debug:
-        msg: "{{ ipq_run.stdout | default('(no stdout)') }} ｜ {{ ipq_wiki.stdout | default('') | trim }}"
+        msg: "{{ ipq_run.stdout | default('(no stdout)') }} ｜ {{ ipq_client.stdout | default('') | trim }} ｜ {{ ipq_wiki.stdout | default('') | trim }}"
 
 - name: Aggregate and notify Telegram
   hosts: localhost
@@ -154,6 +193,12 @@
       ansible.builtin.set_fact:
         ipq_scanned: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | list | length }}"
         ipq_hosts: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list | length }}"
+
+    - name: 统计客户端异常 / 维基不可编辑（来自异常块内容）
+      ansible.builtin.set_fact:
+        ipq_flat_lines: "{{ ipq_blocks | flatten | list }}"
+        ipq_client_bad: "{{ ipq_blocks | flatten | select('match', '^客户端: ⚠️') | list | length }}"
+        ipq_wiki_bad: "{{ ipq_blocks | flatten | select('match', '^wiki 可编辑性:') | select('search', '⛔') | list | length }}"
 
     - name: 汇总头
       ansible.builtin.set_fact:

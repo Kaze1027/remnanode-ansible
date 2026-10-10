@@ -135,6 +135,7 @@ def main():
     detail = False
     alerts_only = False
     wiki_file = None
+    client_file = None
     rest = list(sys.argv[3:])
     i = 0
     while i < len(rest):
@@ -148,11 +149,27 @@ def main():
             wiki_file = arg.split("=", 1)[1]
             i += 1
             continue
+        if low == "--client" and i + 1 < len(rest):
+            client_file = rest[i + 1]
+            i += 2
+            continue
+        if low.startswith("--client="):
+            client_file = arg.split("=", 1)[1]
+            i += 1
+            continue
         if low in ("detail", "1", "true"):
             detail = True
         elif low in ("alerts-only", "alerts", "only-alerts"):
             alerts_only = True
         i += 1
+
+    client_line = ""
+    if client_file:
+        try:
+            with open(client_file, encoding="utf-8", errors="replace") as fh:
+                client_line = (fh.readline() or "").strip()
+        except OSError:
+            client_line = ""
 
     wiki_line = ""
     if wiki_file:
@@ -198,11 +215,14 @@ def main():
         })
 
     wiki_blocked = "⛔" in wiki_line
+    client_bad = "⚠️" in client_line
 
     if alerts_only:
-        if not any(e["abnormal"] for e in entries) and not wiki_blocked:
+        if not any(e["abnormal"] for e in entries) and not wiki_blocked and not client_bad:
             return 0
         print(f"▎{host}")
+        if client_line:
+            print(client_line)
         for e in entries:
             # 保留每行的 IP/组织/地区/类型；解锁信息只留非原生与异常
             print(f"{e['base']} · {e['short']}" if e["short"] else e["base"])
@@ -211,6 +231,8 @@ def main():
         return 0
 
     print(f"▎{host}")
+    if client_line:
+        print(client_line)
     for e in entries:
         print(f"{e['base']} · {e['full']}")
     if wiki_line:
