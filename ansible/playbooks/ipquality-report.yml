@@ -152,8 +152,8 @@
 
     - name: 维基百科可编辑性（当前出口 v4+v6，一行摘要）
       ansible.builtin.shell: |
-        /usr/local/bin/wiki-edit-check.sh --summary > {{ ipq_wiki_file }} 2>/dev/null || true
-        cat {{ ipq_wiki_file }}
+        /usr/local/bin/wiki-edit-check.sh --summary 2>/dev/null | iconv -f UTF-8 -t UTF-8 -c > {{ ipq_wiki_file }} || true
+        iconv -f UTF-8 -t UTF-8 -c < {{ ipq_wiki_file }}
       register: ipq_wiki
       changed_when: false
       failed_when: false
@@ -167,6 +167,7 @@
         {{ 'alerts-only' if (ipq_alerts_only | default(1) | bool) else '' }}
         --wiki {{ ipq_wiki_file }}
         --client {{ ipq_client_file }}
+        | iconv -f UTF-8 -t UTF-8 -c
       register: ipq_lines
       changed_when: false
       failed_when: false
@@ -187,18 +188,18 @@
   tasks:
     - name: 汇总异常节点文本块（正常节点为空，自动排除）
       ansible.builtin.set_fact:
-        ipq_blocks: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list }}"
+        ipq_blocks: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | selectattr('stdout_lines', 'defined') | map(attribute='stdout_lines') | select('truthy') | list }}"
 
     - name: 统计扫描 / 异常台数
       ansible.builtin.set_fact:
-        ipq_scanned: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | list | length }}"
-        ipq_hosts: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | map(attribute='stdout_lines') | select('truthy') | list | length }}"
+        ipq_scanned: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_lines') | select('defined') | selectattr('stdout_lines', 'defined') | list | length }}"
+        ipq_hosts: "{{ ipq_blocks | length }}"
 
     - name: 统计客户端异常 / 维基汇总（v4、v6 不可编辑台数与常见原因）
       ansible.builtin.set_fact:
         ipq_flat_lines: "{{ ipq_blocks | flatten | list }}"
         ipq_client_bad: "{{ ipq_blocks | flatten | select('search', '🧩⚠️') | list | length }}"
-        ipq_wiki_lines: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_wiki') | select('defined') | map(attribute='stdout') | map('trim') | select('truthy') | list }}"
+        ipq_wiki_lines: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_wiki') | select('defined') | selectattr('stdout', 'defined') | map(attribute='stdout') | map('trim') | select('truthy') | list }}"
 
     - name: 维基计数
       ansible.builtin.set_fact:
