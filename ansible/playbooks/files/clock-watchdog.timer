@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Aether clock watchdog every 5 minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=false
+Unit=clock-watchdog.service
+
+[Install]
+WantedBy=timers.target

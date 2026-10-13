@@ -1,0 +1,10 @@
+---
+- name: 时间同步与时钟看门狗（全机队）
+  hosts: nodes
+  become: true
+  tasks:
+    - name: Skip non-Aether hosts (dvn_managed=false)
+      ansible.builtin.meta: end_host
+      when: not (dvn_managed | default(true) | bool)
+
+    - ansible.builtin.include_tasks: tasks/timesync.yml

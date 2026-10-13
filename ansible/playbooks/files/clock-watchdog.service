@@ -1,0 +1,11 @@
+[Unit]
+Description=Aether clock watchdog (SS2022 needs clock within +/-30s)
+Documentation=https://github.com/Kaze1027/remnanode-ansible
+After=chrony.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/clock-watchdog.sh
+Nice=10
+IOSchedulingClass=idle

@@ -160,6 +160,7 @@ def main():
     show_dns = False
     wiki_file = None
     client_file = None
+    clock_file = None
     rest = list(sys.argv[3:])
     i = 0
     while i < len(rest):
@@ -179,6 +180,14 @@ def main():
             continue
         if low.startswith("--client="):
             client_file = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if low == "--clock" and i + 1 < len(rest):
+            clock_file = rest[i + 1]
+            i += 2
+            continue
+        if low.startswith("--clock="):
+            clock_file = arg.split("=", 1)[1]
             i += 1
             continue
         if low in ("detail", "1", "true"):
@@ -204,6 +213,14 @@ def main():
                 wiki_line = (fh.readline() or "").strip()
         except OSError:
             wiki_line = ""
+
+    clock_line = ""
+    if clock_file:
+        try:
+            with open(clock_file, encoding="utf-8", errors="replace") as fh:
+                clock_line = (fh.readline() or "").strip()
+        except OSError:
+            clock_line = ""
 
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -246,9 +263,11 @@ def main():
 
     wiki_blocked = "⛔" in wiki_line
     client_bad = "⚠️" in client_line
+    clock_bad = "⚠️" in clock_line
 
     if alerts_only:
-        if not any(e["abnormal"] for e in entries) and not wiki_blocked and not client_bad:
+        if (not any(e["abnormal"] for e in entries)
+                and not wiki_blocked and not client_bad and not clock_bad):
             return 0
         # ---- 手机版：每台 2 行 ----
         #   第 1 行：📍 节点 · 国家 · 🧩 客户端状态
@@ -276,11 +295,15 @@ def main():
         if wiki_short:
             line2 += f" ｜ 📚{wiki_short}"
         print(line2)
+        if clock_bad:
+            print(clock_line)
         return 0
 
     print(f"▎{host}")
     if client_line:
         print(f"客户端: {client_line}")
+    if clock_line:
+        print(clock_line)
     for e in entries:
         print(f"{e['base']} · {e['full']}")
     if wiki_line:

@@ -1,0 +1,62 @@
+---
+# 时间同步与时钟看门狗（被 deploy.yml 与 timesync.yml 共用）
+# 背景：VM 挂起/迁移会造成小时级时间跳变；Shadowsocks-2022 只容忍 ±30s，
+#       Debian 默认的 "makestep 1 3" 之后只允许缓慢 slew，会把节点"卡死"数天。
+
+- name: Ensure chrony is installed
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: 配置 chrony：大幅跳变立即步进（否则只能慢速 slew）
+  ansible.builtin.copy:
+    dest: /etc/chrony/conf.d/99-aether-makestep.conf
+    mode: "0644"
+    content: |
+      # Aether: VM 挂起/迁移会带来小时级跳变，必须立即步进
+      # makestep <阈值秒> <次数>，-1 = 不限次数
+      makestep 1.0 -1
+      # 长时间失联后仍接受较大偏差
+      maxdistance 16.0
+  register: aether_chrony_conf
+
+- name: Enable and start chrony
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: 配置变更后重启 chrony 以生效
+  ansible.builtin.systemd:
+    name: chrony
+    state: restarted
+  when: aether_chrony_conf.changed
+
+- name: Step system clock immediately
+  ansible.builtin.command: chronyc makestep
+  changed_when: false
+  failed_when: false
+
+- name: 部署时钟看门狗脚本
+  ansible.builtin.copy:
+    src: clock-watchdog.sh
+    dest: /usr/local/bin/clock-watchdog.sh
+    mode: "0755"
+
+- name: 部署时钟看门狗 systemd 单元
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - clock-watchdog.service
+    - clock-watchdog.timer
+
+- name: 启用并启动看门狗定时器（每 5 分钟）
+  ansible.builtin.systemd:
+    name: clock-watchdog.timer
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -34,6 +34,7 @@
     ipq_parser: /usr/local/bin/ipq-parse.py
     ipq_wiki_file: /tmp/ipq-wiki.txt
     ipq_client_file: /tmp/ipq-client.txt
+    ipq_clock_file: /tmp/ipq-clock.txt
     ipq_probe_urls: "https://one.one.one.one/cdn-cgi/trace https://api6.ipify.org https://v6.ipinfo.io/ip"
     dvn_quota_warn: "{{ dvn_quota_warn_pct | default(85) | int }}"
     ipq_flags: "{{ ipq_cli_flags | default('-f -n -p -j') }}"
@@ -158,6 +159,31 @@
       changed_when: false
       failed_when: false
 
+    - name: 时钟同步状态（SS2022 只容忍 ±30s；异常时写入明细）
+      ansible.builtin.shell: |
+        HOST="{{ ansible_host | default(inventory_hostname) }}"
+        sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)
+        off=$(chronyc tracking 2>/dev/null | awk -F': *' '/^System time/{print $2}' | awk '{print $1}')
+        if [ -n "${off:-}" ]; then
+          ms=$(awk -v o="$off" 'BEGIN{d=o*1000; if(d<0)d=-d; printf "%d", d}')
+          human=$(awk -v o="$off" 'BEGIN{printf "%+.1fs", o}')
+        else
+          ms=999999999
+          human="未知"
+        fi
+        if [ "$sync" = "yes" ] && [ "$ms" -le 30000 ]; then
+          : > {{ ipq_clock_file }}
+          printf '🕒 %s ✅ %s\n' "$HOST" "$human"
+        else
+          printf '🕒 %s ⚠️ 时钟偏差 %s（sync=%s）\n' "$HOST" "$human" "$sync" > {{ ipq_clock_file }}
+          cat {{ ipq_clock_file }}
+        fi
+      args:
+        executable: /bin/bash
+      register: ipq_clock
+      changed_when: false
+      failed_when: false
+
     - name: 解析为可读分行文本（默认仅异常）
       ansible.builtin.shell: >-
         python3 {{ ipq_parser }}
@@ -168,6 +194,7 @@
         {{ 'show-dns' if (ipq_show_dns | default(0) | bool) else '' }}
         --wiki {{ ipq_wiki_file }}
         --client {{ ipq_client_file }}
+        --clock {{ ipq_clock_file }}
         | iconv -f UTF-8 -t UTF-8 -c
       register: ipq_lines
       changed_when: false
@@ -202,6 +229,13 @@
         ipq_flat_lines: "{{ ipq_blocks | flatten | list }}"
         ipq_client_bad: "{{ ipq_blocks | flatten | select('search', '🧩⚠️') | list | length }}"
         ipq_wiki_lines: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_wiki') | select('defined') | selectattr('stdout', 'defined') | map(attribute='stdout') | map('trim') | select('truthy') | list }}"
+        ipq_clock_lines: "{{ groups['nodes'] | map('extract', hostvars, 'ipq_clock') | select('defined') | selectattr('stdout', 'defined') | map(attribute='stdout') | map('trim') | select('truthy') | list }}"
+
+    - name: 时钟统计（SS2022 容差 ±30s）
+      ansible.builtin.set_fact:
+        ipq_clock_total: "{{ ipq_clock_lines | length }}"
+        ipq_clock_bad_list: "{{ ipq_clock_lines | select('search', '⚠️') | map('regex_replace', '^🕒 ([^ ]+) .*', '\\1') | list }}"
+        ipq_clock_bad: "{{ ipq_clock_lines | select('search', '⚠️') | list | length }}"
 
     - name: 维基计数（v4 优先口径）
       ansible.builtin.set_fact:
