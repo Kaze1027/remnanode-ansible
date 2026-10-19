@@ -237,6 +237,21 @@
         ipq_clock_bad_list: "{{ ipq_clock_lines | select('search', '⚠️') | map('regex_replace', '^🕒 ([^ ]+) .*', '\\1') | list }}"
         ipq_clock_bad: "{{ ipq_clock_lines | select('search', '⚠️') | list | length }}"
 
+    - name: 缺失节点统计（不可达主机不能被静默丢弃）
+      ansible.builtin.set_fact:
+        ipq_excluded: "{{ groups['nodes'] | map('extract', hostvars) | selectattr('dvn_managed', 'defined') | rejectattr('dvn_managed') | map(attribute='inventory_hostname') | list }}"
+        ipq_scanned_hosts: "{{ groups['nodes'] | map('extract', hostvars) | selectattr('ipq_lines', 'defined') | map(attribute='inventory_hostname') | list }}"
+
+    - name: 计算缺失主机列表
+      ansible.builtin.set_fact:
+        ipq_missing: "{{ (groups['nodes'] | difference(ipq_excluded)) | difference(ipq_scanned_hosts) }}"
+
+    - name: 缺失主机展示文本（最多 8 个）
+      ansible.builtin.set_fact:
+        ipq_expected: "{{ (groups['nodes'] | difference(ipq_excluded)) | length }}"
+        ipq_missing_count: "{{ ipq_missing | length }}"
+        ipq_missing_shown: "{{ (ipq_missing[:8] | join(' ')) ~ (' 等 ' ~ (ipq_missing | length) ~ ' 台' if (ipq_missing | length) > 8 else '') }}"
+
     - name: 维基计数（v4 优先口径）
       ansible.builtin.set_fact:
         ipq_wiki_v4_ok: "{{ ipq_wiki_lines | select('search', 'v4 ✅') | list | length }}"
