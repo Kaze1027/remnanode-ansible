@@ -1,4 +1,4 @@
-ARG BASE_TAG=3.2.2
+ARG BASE_TAG=3.4.4
 FROM remnawave/node:${BASE_TAG}
 
 COPY geoip.dat /tmp/geoip.dat
