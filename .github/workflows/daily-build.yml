@@ -19,7 +19,7 @@ permissions:
   packages: write
 
 env:
-  DEFAULT_BASE_TAG: "3.4.4"
+  DEFAULT_BASE_TAG: "3.4.5"
 
 concurrency:
   group: daily-build
