@@ -1,4 +1,5 @@
-FROM remnawave/node:3.2.2
+ARG BASE_TAG=3.2.2
+FROM remnawave/node:${BASE_TAG}
 
 COPY geoip.dat /tmp/geoip.dat
 COPY geosite.dat /tmp/geosite.dat

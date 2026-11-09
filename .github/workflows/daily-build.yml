@@ -4,66 +4,133 @@ on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+    inputs:
+      base_tag:
+        description: "固定版本的基础镜像 tag（留空则用 DEFAULT_BASE_TAG）"
+        required: false
+        default: ""
+      skip_upstream:
+        description: "跳过 latest（追上游）构建"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   packages: write
 
+env:
+  DEFAULT_BASE_TAG: "3.2.2"
+
+concurrency:
+  group: daily-build
+  cancel-in-progress: false
+
 jobs:
-  build:
+  rules:
+    name: fetch geo rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify geo rules
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat"
+          CURL_OPTS=(--retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 300)
+
+          # 先把 release tag 解析成具体版本，dat 与 sha256sum 从同一 tag 取，
+          # 避免 releases/latest 在发布瞬间指向不同版本造成校验不一致
+          TAG=$(curl -fsSL "${CURL_OPTS[@]}" "$API/releases/latest" | jq -r '.tag_name // empty')
+          if [ -z "$TAG" ]; then
+            echo "ERROR: 无法解析上游 release tag" >&2
+            exit 1
+          fi
+          echo "upstream rules release: $TAG"
+          BASE="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/$TAG"
+
+          for f in geoip.dat geosite.dat; do
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              echo "--- $f 第 $attempt 次尝试 ---"
+              rm -f "$f" "$f.sha256sum"
+              if curl -fL "${CURL_OPTS[@]}" -o "$f" "$BASE/$f" \
+                 && curl -fL "${CURL_OPTS[@]}" -o "$f.sha256sum" "$BASE/$f.sha256sum"; then
+                if sha256sum -c "$f.sha256sum"; then
+                  echo "$f 校验通过（$(stat -c%s "$f") 字节）"
+                  ok=1
+                  break
+                fi
+                echo "::warning::$f 校验不通过，准备重试"
+              else
+                echo "::warning::$f 下载失败，准备重试"
+              fi
+              sleep $((attempt * 5))
+            done
+            if [ "$ok" != "1" ]; then
+              echo "ERROR: $f 连续 5 次下载/校验失败" >&2
+              exit 1
+            fi
+          done
+
+      - name: Upload geo rules
+        uses: actions/upload-artifact@v4
+        with:
+          name: geo-rules
+          path: |
+            geoip.dat
+            geosite.dat
+          retention-days: 1
+          if-no-files-found: error
+
+  pinned:
+    name: build pinned
+    needs: rules
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Download and verify geoip.dat
-        run: |
-          curl -fL -o geoip.dat \
-            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-          curl -fL -o geoip.dat.sha256sum \
-            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat.sha256sum"
-          EXPECTED=$(awk '{print $1}' geoip.dat.sha256sum)
-          ACTUAL=$(sha256sum geoip.dat | awk '{print $1}')
-          if [ "$EXPECTED" = "$ACTUAL" ]; then
-            echo "geoip.dat checksum OK"
-          else
-            echo "geoip.dat CHECKSUM MISMATCH (expected $EXPECTED, got $ACTUAL)" >&2
-            exit 1
-          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: geo-rules
 
-      - name: Download and verify geosite.dat
+      - name: Resolve tags
+        id: vars
+        env:
+          INPUT_TAG: ${{ github.event.inputs.base_tag }}
         run: |
-          curl -fL -o geosite.dat \
-            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-          curl -fL -o geosite.dat.sha256sum \
-            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat.sha256sum"
-          EXPECTED=$(awk '{print $1}' geosite.dat.sha256sum)
-          ACTUAL=$(sha256sum geosite.dat | awk '{print $1}')
-          if [ "$EXPECTED" = "$ACTUAL" ]; then
-            echo "geosite.dat checksum OK"
-          else
-            echo "geosite.dat CHECKSUM MISMATCH (expected $EXPECTED, got $ACTUAL)" >&2
-            exit 1
-          fi
+          set -euo pipefail
+          BASE_TAG="${INPUT_TAG:-$DEFAULT_BASE_TAG}"
+          if [ -z "${BASE_TAG// /}" ]; then BASE_TAG="$DEFAULT_BASE_TAG"; fi
+          REPO="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "base_tag=$BASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "基础镜像 remnawave/node:$BASE_TAG"
 
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build and push image
+      - name: Build and push pinned image
+        env:
+          BASE_TAG: ${{ steps.vars.outputs.base_tag }}
+          REPO: ${{ steps.vars.outputs.repo }}
         run: |
-          REPO="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
-          docker build -t "$REPO/remnanode:latest" -t "$REPO/remnanode:3.2.2" .
-          docker push "$REPO/remnanode:latest"
-          docker push "$REPO/remnanode:3.2.2"
-          echo "IMAGE=$REPO/remnanode:latest" >> "$GITHUB_ENV"
+          set -euo pipefail
+          IMG="$REPO/remnanode:$BASE_TAG"
+          docker build --build-arg BASE_TAG="$BASE_TAG" -t "$IMG" .
+          docker push "$IMG"
+          echo "IMAGE=$IMG" >> "$GITHUB_ENV"
+
+      - name: Report Xray version
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/xray "$IMAGE" version 2>/dev/null | head -1 || echo "xray version unavailable"
 
       - name: Verify dat files inside built image
         run: |
+          set -euo pipefail
           CID=$(docker run -d --entrypoint sh "$IMAGE" -c 'sleep 600')
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
           for f in geoip.dat geosite.dat; do
             P=$(docker exec "$CID" sh -c 'find / -type f -name "$1" 2>/dev/null | head -n 1' sh "$f")
             if [ -z "$P" ]; then
               echo "ERROR: $f not found inside image" >&2
-              docker rm -f "$CID" >/dev/null
               exit 1
             fi
             docker cp "$CID:$P" "/tmp/$f.image"
@@ -71,8 +138,73 @@ jobs:
               echo "$f verified inside image at $P"
             else
               echo "ERROR: $f inside image differs from downloaded file" >&2
-              docker rm -f "$CID" >/dev/null
               exit 1
             fi
           done
-          docker rm -f "$CID" >/dev/null
+
+  upstream:
+    name: build latest (follow upstream)
+    needs: rules
+    if: ${{ needs.rules.result == 'success' && inputs.skip_upstream != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: geo-rules
+
+      - name: Resolve repo
+        id: vars
+        run: |
+          set -euo pipefail
+          echo "repo=ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push upstream image
+        env:
+          REPO: ${{ steps.vars.outputs.repo }}
+        run: |
+          set -euo pipefail
+          DATE_TAG="upstream-$(date -u +%Y%m%d)"
+          docker build --build-arg BASE_TAG=latest -t "$REPO/remnanode:latest" .
+          UPSTREAM_DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' remnawave/node:latest 2>/dev/null || echo unknown)
+          docker tag "$REPO/remnanode:latest" "$REPO/remnanode:$DATE_TAG"
+          docker push "$REPO/remnanode:latest"
+          docker push "$REPO/remnanode:$DATE_TAG"
+          echo "IMAGE=$REPO/remnanode:latest" >> "$GITHUB_ENV"
+          echo "upstream base: $UPSTREAM_DIGEST"
+          echo "extra tag: $DATE_TAG"
+          {
+            echo "### latest 追上游构建"
+            echo ""
+            echo "- 基础镜像：\`remnawave/node:latest\`"
+            echo "- digest：\`$UPSTREAM_DIGEST\`"
+            echo "- 额外标签：\`$DATE_TAG\`（可回滚用）"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report Xray version
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/xray "$IMAGE" version 2>/dev/null | head -1 || echo "xray version unavailable"
+
+      - name: Verify dat files inside built image
+        run: |
+          set -euo pipefail
+          CID=$(docker run -d --entrypoint sh "$IMAGE" -c 'sleep 600')
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+          for f in geoip.dat geosite.dat; do
+            P=$(docker exec "$CID" sh -c 'find / -type f -name "$1" 2>/dev/null | head -n 1' sh "$f")
+            if [ -z "$P" ]; then
+              echo "ERROR: $f not found inside image" >&2
+              exit 1
+            fi
+            docker cp "$CID:$P" "/tmp/$f.image"
+            if cmp -s "$f" "/tmp/$f.image"; then
+              echo "$f verified inside image at $P"
+            else
+              echo "ERROR: $f inside image differs from downloaded file" >&2
+              exit 1
+            fi
+          done
